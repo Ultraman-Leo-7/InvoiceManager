@@ -8,6 +8,7 @@ on:
       - "invoice_extract.py"
       - "jd_qq.py"
       - "purchase_tracker.py"
+      - "tests/**"
       - "requirements.txt"
       - "requirements-dev.txt"
       - "tools/generate_icon.py"
@@ -43,6 +44,11 @@ jobs:
         run: |
           python -m py_compile app.py invoice_extract.py jd_qq.py purchase_tracker.py tools/generate_icon.py
           python -c "import app, invoice_extract, jd_qq, purchase_tracker; print('import check ok')"
+
+      - name: Run unit tests
+        shell: pwsh
+        run: |
+          python -m pytest -q
 
       - name: Generate app icon
         shell: pwsh
@@ -91,4 +97,4 @@ jobs:
             --target "$env:GITHUB_SHA" `
             --title "InvoiceManager $tag" `
             --prerelease `
-            --notes "InvoiceManager Windows x64 测试版。下载 InvoiceManager-Windows-x64.exe，放入发票 PDF 文件夹后直接双击运行。Release 同时提供 SHA256SUMS.txt 用于校验下载文件。包含：PDF 发票解析、QQ 邮箱京东发票获取、购买记录、商品/快递费分开发票匹配、2 秒文件夹自动刷新、全字段搜索、表头排序、Ctrl/Shift 多选、人工确认/备注、批量删除发票、Excel 导出。"
+            --notes "InvoiceManager Windows x64 测试版。该版本在发布前已自动执行语法检查、import 检查和单元测试。下载 InvoiceManager-Windows-x64.exe，放入发票 PDF 文件夹后直接双击运行。Release 同时提供 SHA256SUMS.txt 用于校验下载文件。包含：PDF 发票解析、QQ 邮箱京东发票获取、购买记录、商品/快递费分开发票匹配、2 秒文件夹自动刷新、全字段搜索、表头排序、Ctrl/Shift 多选、人工确认/备注、批量删除发票、Excel 导出。"
