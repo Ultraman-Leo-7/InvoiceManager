@@ -4,15 +4,10 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release tag, e.g. v5.2.9-beta.1 or v5.2.9"
+        description: "Release tag, e.g. v5.2.9"
         required: true
-        default: "v5.2.9-beta.1"
+        default: "v5.2.9"
         type: string
-      prerelease:
-        description: "Publish as a pre-release"
-        required: true
-        default: true
-        type: boolean
 
 permissions:
   contents: write
@@ -88,23 +83,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_VERSION: ${{ inputs.version }}
-          RELEASE_PRERELEASE: ${{ inputs.prerelease }}
         run: |
-          if ($env:RELEASE_VERSION -notmatch '^v\d+\.\d+\.\d+([-.][0-9A-Za-z.-]+)?$') {
+          if ($env:RELEASE_VERSION -notmatch '^v\d+\.\d+\.\d+$') {
             throw "Invalid version format: $env:RELEASE_VERSION"
           }
 
-          $args = @(
-            "release", "create", $env:RELEASE_VERSION,
-            "dist/InvoiceManager-Windows-x64.exe",
-            "dist/SHA256SUMS.txt",
-            "--target", $env:GITHUB_SHA,
-            "--title", "InvoiceManager $env:RELEASE_VERSION",
-            "--notes", "InvoiceManager Windows x64 版本。该版本在发布前已自动执行语法检查、import 检查和单元测试。下载 InvoiceManager-Windows-x64.exe，放入发票 PDF 文件夹后直接双击运行。Release 同时提供 SHA256SUMS.txt 用于校验下载文件。"
-          )
-
-          if ($env:RELEASE_PRERELEASE -eq "true") {
-            $args += "--prerelease"
-          }
-
-          gh @args
+          gh release create $env:RELEASE_VERSION `
+            "dist/InvoiceManager-Windows-x64.exe" `
+            "dist/SHA256SUMS.txt" `
+            --target "$env:GITHUB_SHA" `
+            --title "InvoiceManager $env:RELEASE_VERSION" `
+            --notes "InvoiceManager Windows x64 版本。该版本在发布前已自动执行语法检查、import 检查和单元测试。下载 InvoiceManager-Windows-x64.exe，放入发票 PDF 文件夹后直接双击运行。Release 同时提供 SHA256SUMS.txt 用于校验下载文件。"
