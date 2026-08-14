@@ -14,6 +14,7 @@ on:
       - "requirements.txt"
       - "requirements-dev.txt"
       - "tools/**"
+      - "assets/**"
       - ".github/workflows/ci.yml"
   pull_request:
     branches: [main]
@@ -52,3 +53,27 @@ jobs:
         shell: pwsh
         run: |
           python -m pytest -q
+
+      - name: Generate app icon
+        shell: pwsh
+        run: |
+          python tools/generate_icon.py
+
+      - name: PyInstaller packaging smoke test
+        shell: pwsh
+        run: |
+          pyinstaller --noconfirm --clean --onefile --windowed `
+            --icon "assets/InvoiceManager.ico" `
+            --name "InvoiceManager-Windows-x64" `
+            app.py
+          if (-not (Test-Path "dist/InvoiceManager-Windows-x64.exe")) {
+            throw "exe build output not found"
+          }
+
+      - name: Upload CI executable
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: InvoiceManager-Windows-x64-CI
+          path: dist/InvoiceManager-Windows-x64.exe
+          if-no-files-found: error
