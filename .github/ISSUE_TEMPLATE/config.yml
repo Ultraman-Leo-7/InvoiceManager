@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security / 隐私问题
+    url: https://github.com/Ultraman-Leo-7/InvoiceManager/security
+    about: 涉及授权码、隐私泄露或安全漏洞时，请优先查看 Security 页面，不要在公开 Issue 中粘贴敏感信息。
