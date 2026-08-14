@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">InvoiceManager icon</title>
+  <desc id="desc">A document with a folded corner and a check mark.</desc>
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#2563eb"/>
+      <stop offset="100%" stop-color="#0f766e"/>
+    </linearGradient>
+  </defs>
+  <rect x="32" y="32" width="448" height="448" rx="112" fill="url(#g)"/>
+  <path d="M144 100h148l76 76v236H144z" fill="#fff" opacity="0.97"/>
+  <path d="M292 100v76h76" fill="#dbeafe"/>
+  <path d="M292 100v76h76" fill="none" stroke="#bfdbfe" stroke-width="8" stroke-linejoin="round"/>
+  <path d="M194 228h124M194 272h124M194 316h78" fill="none" stroke="#93c5fd" stroke-width="18" stroke-linecap="round"/>
+  <path d="M236 356l34 34 74-86" fill="none" stroke="#0f766e" stroke-width="26" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
