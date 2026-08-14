@@ -154,4 +154,66 @@ in the same invoice folder as the executable.
 
 On Windows, InvoiceManager attempts to mark it as a hidden file so it does not clutter the folder.
 
-Deleting this database removes saved program state such as purchase records, notes, manual confirmations and stored settings. Back it up before intentionally removing it.
+Deleting this database removes saved program state such as purchase records, notes, manual confirmations and stored settings. Configure a Nutstore backup before intentionally removing it.
+
+## Where are local purchase-record safety backups?
+
+Before editing, deleting, or clearing existing purchase records, InvoiceManager creates a SQLite snapshot in:
+
+```text
+.invoice_manager_backups/
+```
+
+The program keeps the most recent local safety snapshots. If a snapshot cannot be created, the destructive purchase operation is cancelled.
+
+## Nutstore connection fails
+
+Check all three items:
+
+1. Username is the email address of the Nutstore account.
+2. Password is a Nutstore **third-party application/WebDAV password**, not the normal account password.
+3. The computer can reach Nutstore WebDAV over HTTPS.
+
+Use **数据备份 -> 测试连接** before enabling long-term automatic backup.
+
+Repeatedly using an invalid WebDAV password may cause the Nutstore account to temporarily reject requests, so fix the saved password rather than repeatedly retrying a known-bad credential.
+
+## Why are QQ Mail and Nutstore passwords missing after cloud restore?
+
+This is intentional.
+
+Cloud snapshots remove the DPAPI-protected QQ Mail authorization code and Nutstore application password before upload. These secrets are device-bound and should not be treated as portable cloud data.
+
+After restoring on a new computer, enter those two secrets again.
+
+## Nutstore automatic backup failed — did I lose my purchase record?
+
+A cloud-backup failure does **not** roll back the successful local SQLite save. Your purchase record remains in `.invoice_manager.db`.
+
+Open **数据备份** and check the most recent successful backup time and most recent failure message. Once the connection problem is fixed, click **立即备份**.
+
+## I accidentally deleted or cleared purchase records
+
+Do not immediately make many more changes.
+
+InvoiceManager creates a local safety snapshot before destructive purchase actions. If Nutstore automatic backup was enabled, older timestamped cloud backups may also contain the pre-deletion state.
+
+Use **数据备份 -> 从坚果云恢复** to choose an older cloud snapshot. If cloud backup was not configured, preserve the entire invoice folder, including `.invoice_manager_backups/`, before troubleshooting.
+
+## “检查更新” does nothing automatically at startup
+
+That is intentional. InvoiceManager does not automatically check for updates.
+
+It contacts GitHub Releases only when the user clicks **检查更新**.
+
+## An update was downloaded but replacement failed
+
+InvoiceManager verifies the downloaded executable against the release `SHA256SUMS.txt` before trying to replace the current exe.
+
+If replacement still fails, common causes include:
+
+- Antivirus/security software holding the executable open
+- The invoice folder being read-only
+- The current Windows user lacking write permission to the folder
+
+Your `.invoice_manager.db` is separate from the executable, so a failed exe replacement should not by itself erase purchase records or notes.
