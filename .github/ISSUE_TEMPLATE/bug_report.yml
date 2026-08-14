@@ -1,0 +1,78 @@
+name: Bug 反馈
+description: 报告 InvoiceManager 的可复现问题
+title: "[Bug] "
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈。请尽量填写完整信息，尤其是版本号、Windows 版本和复现步骤。
+
+        **请勿上传 QQ 邮箱授权码、发票中的身份证号/税号/地址/电话等敏感信息。** 如需截图，请先打码。
+
+  - type: input
+    id: version
+    attributes:
+      label: InvoiceManager 版本
+      description: 可在程序窗口标题或 GitHub Release 中查看，例如 v5.2.x。
+      placeholder: v5.2.x
+    validations:
+      required: true
+
+  - type: input
+    id: windows
+    attributes:
+      label: Windows 版本
+      placeholder: Windows 11 24H2
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: 问题模块
+      options:
+        - 程序启动 / GUI
+        - PDF 发票解析
+        - QQ 邮箱 / 京东发票获取
+        - 购买记录
+        - 发票价格匹配
+        - 搜索 / 排序 / 多选
+        - 人工确认 / 备注
+        - 删除发票
+        - Excel 导出
+        - GitHub Release / 安装
+        - 其他
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: 问题描述
+      description: 实际发生了什么？你原本期望发生什么？
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. 打开程序
+        2. 点击……
+        3. 输入……
+        4. 出现……
+    validations:
+      required: true
+
+  - type: textarea
+    id: error
+    attributes:
+      label: 报错信息 / 截图
+      description: 如有报错请完整粘贴。截图前请打码敏感信息。
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: 其他补充
