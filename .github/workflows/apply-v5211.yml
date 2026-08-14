@@ -1,0 +1,32 @@
+name: Apply v5.2.11 settings redesign
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/apply-v5211.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply settings redesign
+        run: python tools/apply_v5211.py
+
+      - name: Commit changes
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app.py README.md CHANGELOG.md docs SUPPORT.md SECURITY.md PRIVACY.md CONTRIBUTING.md 2>/dev/null || true
+          git diff --cached --quiet && exit 0
+          git commit -m "Redesign settings UI for v5.2.11"
+          git push origin HEAD:main
