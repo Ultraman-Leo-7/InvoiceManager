@@ -2,7 +2,7 @@
 
 InvoiceManager separates normal CI from release publication.
 
-A normal push to `main` should **not** create a new GitHub Release. This keeps the Releases page readable and avoids publishing a new executable for every small documentation or code change.
+Normal code changes only run CI. A new GitHub Release is created only when we explicitly decide to publish a new version.
 
 ## Before publishing
 
@@ -19,55 +19,35 @@ Open:
 GitHub -> Actions -> Build Windows Release -> Run workflow
 ```
 
-The workflow asks for:
-
-- `version` — for example `v5.2.9-beta.1` or `v5.2.9`
-- `prerelease` — enable for test/beta builds; disable for a normal stable release
-
-The version must follow the form:
-
-```text
-vMAJOR.MINOR.PATCH
-```
-
-An optional suffix is allowed, for example:
-
-```text
-v5.2.9-beta.1
-```
-
-## Historical note about v5.2.1 ~ v5.2.8
-
-The early GitHub Actions workflow automatically generated tags like:
-
-```text
-v5.2.1
-v5.2.2
-...
-v5.2.8
-```
-
-At that time, the last number came directly from `GITHUB_RUN_NUMBER`. In other words, `v5.2.8` mainly meant "the eighth release-workflow run", not that the product had intentionally gone through eight carefully managed patch releases.
-
-Those tags are already public, so the project will **not go backwards** to `v5.2.0`. From now on version numbers remain monotonic.
-
-Therefore the next canonical test release should be:
-
-```text
-v5.2.9-beta.1
-```
-
-and, after testing, the corresponding stable release can be:
+Enter the next version number, for example:
 
 ```text
 v5.2.9
 ```
 
-A later feature release can move to `v5.3.0` when appropriate.
+The project uses a deliberately simple version format:
+
+```text
+vMAJOR.MINOR.PATCH
+```
+
+No beta / alpha suffix is required.
+
+## Historical note about v5.2.1 ~ v5.2.8
+
+The early GitHub Actions workflow automatically generated tags such as `v5.2.1` through `v5.2.8` by using the workflow run number as the last part of the version.
+
+Those versions are already public, so the project will not go backwards. The next release should simply continue with:
+
+```text
+v5.2.9
+```
+
+After that, small fixes can continue as `v5.2.10`, `v5.2.11`, and so on. A larger feature update can move to `v5.3.0`.
 
 ## What the workflow does
 
-The release job runs on a clean Windows GitHub runner and performs the following steps:
+The release job runs on a clean Windows GitHub runner and performs:
 
 ```text
 Checkout source
@@ -88,45 +68,22 @@ Generate SHA256 checksum
     ↓
 Upload Actions artifact
     ↓
-Create GitHub Release / Pre-release
+Create GitHub Release
 ```
 
-The published files are:
+Published files:
 
 ```text
 InvoiceManager-Windows-x64.exe
 SHA256SUMS.txt
 ```
 
-## Why release publication is explicit
+## Simple versioning rule
 
-Earlier development builds created a pre-release automatically on every relevant push. That was useful while validating the first packaging workflow, but it quickly produced many nearly identical releases.
+Keep it simple:
 
-For a public project, the current model is cleaner:
+- Small fixes: increment the last number, e.g. `v5.2.9` -> `v5.2.10`.
+- Larger feature update: increment the middle number, e.g. `v5.2.10` -> `v5.3.0`.
+- Major redesign or incompatible change: increment the first number.
 
-- **CI is automatic** on code changes.
-- **Publishing is explicit** when a version is actually worth giving to users.
-
-## Versioning guideline
-
-For test builds, use a suffix while keeping the numeric version higher than the latest published tag:
-
-```text
-v5.2.9-beta.1
-v5.2.9-beta.2
-```
-
-When the tested build is ready for ordinary users, publish:
-
-```text
-v5.2.9
-```
-
-For a larger feature update, increment the minor version, for example:
-
-```text
-v5.3.0-beta.1
-v5.3.0
-```
-
-Do not use the GitHub Actions run number as the long-term product version again.
+Do not use the GitHub Actions run number as the product version again.
