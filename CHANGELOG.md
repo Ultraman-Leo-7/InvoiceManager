@@ -14,6 +14,7 @@ All notable changes to InvoiceManager will be documented here.
 - Optional mailbox start time down to the minute
 - Saved QQ Mail authorization code with Windows DPAPI protection
 - Purchase record management
+- Append-only SQLite purchase audit trail for insert/update/delete history and recovery diagnostics
 - Purchase-record total amount display (item prices + shipping fees)
 - Separate product-price and shipping-fee invoice matching
 - Price-based one-to-one purchase/invoice matching
@@ -45,6 +46,7 @@ All notable changes to InvoiceManager will be documented here.
 - Unit tests for purchase matching and QQ/JD helper logic
 - Authorization-code protection round-trip test
 - Backup/snapshot/restore tests
+- Purchase audit trail tests
 - Version parsing tests for the updater
 - Release build gate: syntax check, import check and pytest must pass before packaging
 - CI on both `main` pushes and Pull Requests
@@ -68,7 +70,7 @@ All notable changes to InvoiceManager will be documented here.
 - Excel is now an export format rather than the primary state store
 - Manual confirmation and notes survive PDF refreshes
 - Purchase matching results are visible from both invoice and purchase views
-- Purchase data has multiple recovery layers: SQLite transaction storage, local safety snapshots, and optional Nutstore history backups
+- Purchase data has multiple recovery layers: SQLite transaction storage, append-only audit history, local safety snapshots, and optional Nutstore history backups
 - Cloud backups are created from SQLite Backup API snapshots rather than directly copying a live database file
 - Cloud restore validates the downloaded SQLite database before replacing local data
 - Release naming and documentation are more suitable for public users
