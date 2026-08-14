@@ -8,6 +8,8 @@
 - 无快递费：一条购买记录需要 1 张“商品价格”发票；
 - 有快递费：一条购买记录需要 2 张发票，分别匹配“商品价格”和“快递费”；
 - 每张发票最多匹配一次，每个购买组成项也最多匹配一张发票。
+
+购买记录另外维护 append-only 审计历史，用于误删/异常情况下的恢复和排查。
 """
 
 from __future__ import annotations
@@ -41,6 +43,81 @@ def init_purchase_table(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE purchases ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''"
         )
+
+    # 购买记录审计历史：正常界面不依赖它，但它为恢复/排查提供第二份证据。
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS purchase_audit (
+            audit_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            purchase_id INTEGER NOT NULL,
+            action TEXT NOT NULL,
+            name TEXT NOT NULL,
+            item_price REAL NOT NULL,
+            has_shipping INTEGER NOT NULL,
+            shipping_fee REAL NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            audited_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_purchase_audit_purchase_id ON purchase_audit(purchase_id, audit_id)"
+    )
+
+    # SQLite triggers ensure history is written even if a future caller changes data
+    # without going through the normal Python helper functions.
+    conn.executescript(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_purchases_audit_insert
+        AFTER INSERT ON purchases
+        BEGIN
+            INSERT INTO purchase_audit(
+                purchase_id, action, name, item_price, has_shipping,
+                shipping_fee, created_at, updated_at
+            ) VALUES(
+                NEW.id, 'INSERT', NEW.name, NEW.item_price, NEW.has_shipping,
+                NEW.shipping_fee, NEW.created_at, NEW.updated_at
+            );
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS trg_purchases_audit_update
+        BEFORE UPDATE ON purchases
+        BEGIN
+            INSERT INTO purchase_audit(
+                purchase_id, action, name, item_price, has_shipping,
+                shipping_fee, created_at, updated_at
+            ) VALUES(
+                OLD.id, 'UPDATE_BEFORE', OLD.name, OLD.item_price, OLD.has_shipping,
+                OLD.shipping_fee, OLD.created_at, OLD.updated_at
+            );
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS trg_purchases_audit_update_after
+        AFTER UPDATE ON purchases
+        BEGIN
+            INSERT INTO purchase_audit(
+                purchase_id, action, name, item_price, has_shipping,
+                shipping_fee, created_at, updated_at
+            ) VALUES(
+                NEW.id, 'UPDATE_AFTER', NEW.name, NEW.item_price, NEW.has_shipping,
+                NEW.shipping_fee, NEW.created_at, NEW.updated_at
+            );
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS trg_purchases_audit_delete
+        BEFORE DELETE ON purchases
+        BEGIN
+            INSERT INTO purchase_audit(
+                purchase_id, action, name, item_price, has_shipping,
+                shipping_fee, created_at, updated_at
+            ) VALUES(
+                OLD.id, 'DELETE', OLD.name, OLD.item_price, OLD.has_shipping,
+                OLD.shipping_fee, OLD.created_at, OLD.updated_at
+            );
+        END;
+        """
+    )
 
 
 def _money_to_cents(value) -> int | None:
@@ -161,6 +238,18 @@ def get_purchase(conn: sqlite3.Connection, purchase_id: int):
     ).fetchone()
 
 
+def list_purchase_audit(conn: sqlite3.Connection, purchase_id: int | None = None):
+    """Return append-only purchase history for recovery/diagnostics."""
+    if purchase_id is None:
+        return conn.execute(
+            "SELECT * FROM purchase_audit ORDER BY audit_id"
+        ).fetchall()
+    return conn.execute(
+        "SELECT * FROM purchase_audit WHERE purchase_id=? ORDER BY audit_id",
+        (int(purchase_id),),
+    ).fetchall()
+
+
 def required_components(purchase) -> list[dict]:
     """把一条购买记录拆成需要匹配的发票组成项。"""
     components = [
@@ -202,7 +291,6 @@ def match_purchases(conn: sqlite3.Connection) -> dict:
         """
     ).fetchall()
 
-    # 价格 -> 尚未使用的发票列表
     by_price: dict[int, list] = {}
     for inv in invoices:
         cents = _money_to_cents(inv["total"])
