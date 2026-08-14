@@ -1006,12 +1006,8 @@ class InvoiceApp(tk.Tk):
             if actual is not None and int(round(actual * 100)) != int(round(expected * 100)):
                 if not messagebox.askyesno(
                     APP_TITLE,
-                    f"金额不同，仍要手动关联吗？
-
-购买记录“{kind}”：¥{expected:.2f}
-"
-                    f"所选发票：¥{actual:.2f}
-{filename}",
+                    f"金额不同，仍要手动关联吗？\n\n购买记录“{kind}”：¥{expected:.2f}\n"
+                    f"所选发票：¥{actual:.2f}\n{filename}",
                     parent=win,
                 ):
                     return
