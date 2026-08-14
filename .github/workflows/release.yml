@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release tag, e.g. v5.2.11"
+        description: "Release tag, e.g. v5.2.12"
         required: true
-        default: "v5.2.11"
+        default: "v5.2.12"
         type: string
 
 permissions:
@@ -35,8 +35,8 @@ jobs:
       - name: Syntax and import check
         shell: pwsh
         run: |
-          python -m py_compile app.py invoice_extract.py jd_qq.py purchase_tracker.py data_backup.py self_update.py tools/generate_icon.py
-          python -c "import app, invoice_extract, jd_qq, purchase_tracker, data_backup, self_update; print('import check ok')"
+          python -m py_compile app.py version.py invoice_extract.py jd_qq.py purchase_tracker.py data_backup.py self_update.py tools/generate_icon.py
+          python -c "import app, version, invoice_extract, jd_qq, purchase_tracker, data_backup, self_update; print('import check ok')"
 
       - name: Run unit tests
         shell: pwsh
@@ -93,4 +93,4 @@ jobs:
             "dist/SHA256SUMS.txt" `
             --target "$env:GITHUB_SHA" `
             --title "InvoiceManager $env:RELEASE_VERSION" `
-            --notes "InvoiceManager Windows x64 版本。下载 InvoiceManager-Windows-x64.exe，放入发票 PDF 文件夹后直接双击运行。Release 同时提供 SHA256SUMS.txt 用于校验下载文件。"
+            --notes "InvoiceManager Windows x64 版本。v5.2.12 修复程序内更新后偶发的 PyInstaller onefile _MEI 临时目录 / python312.dll 启动错误。下载 InvoiceManager-Windows-x64.exe，放入发票 PDF 文件夹后直接双击运行。Release 同时提供 SHA256SUMS.txt 用于校验下载文件。"
