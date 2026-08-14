@@ -2,7 +2,7 @@
 
 All notable changes to InvoiceManager will be documented here.
 
-## v5.2.10 (in development)
+## v5.2.10
 
 ### Added
 
