@@ -1,0 +1,70 @@
+name: Apply v5.2.12 updater fix
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/apply-v5212-updater-fix.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Patch app and docs
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          app = Path('app.py')
+          text = app.read_text(encoding='utf-8')
+          text = text.replace('"""InvoiceManager v5.2.11 GUI."""', '"""InvoiceManager GUI."""', 1)
+          old_import = 'from self_update import download_verified_update, latest_release, schedule_windows_replacement\n\nAPP_TITLE = "InvoiceManager"\nAPP_VERSION = "5.2.11"\n'
+          new_import = 'from self_update import download_verified_update, latest_release, schedule_windows_replacement\nfrom version import APP_VERSION\n\nAPP_TITLE = "InvoiceManager"\n'
+          if old_import not in text:
+              raise SystemExit('expected app version block not found')
+          text = text.replace(old_import, new_import, 1)
+          app.write_text(text, encoding='utf-8')
+
+          readme = Path('README.md')
+          text = readme.read_text(encoding='utf-8')
+          old = '7. 自动重新打开新版。\n\n更新只替换 exe，不会主动覆盖 `.invoice_manager.db`。'
+          new = ('7. 自动重新打开新版。\n\n'
+                 '从 v5.2.12 起，重启新版时会显式重置 PyInstaller 的临时运行环境，避免旧实例退出时清理 `_MEI` 临时目录导致新版启动时报 `Failed to load Python DLL`。\n\n'
+                 '更新只替换 exe，不会主动覆盖 `.invoice_manager.db`。')
+          if old not in text:
+              raise SystemExit('expected README update section not found')
+          readme.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          changelog = Path('CHANGELOG.md')
+          text = changelog.read_text(encoding='utf-8')
+          marker = 'All notable changes to InvoiceManager will be documented here.\n\n'
+          section = '''## v5.2.12\n\n### Fixed\n\n- Fixed the Windows in-app updater occasionally launching the replacement onefile executable with inherited PyInstaller `_PYI_*` state, which could cause `Failed to load Python DLL ... _MEI...\\python312.dll` immediately after updating\n- The updater now waits for the current application process to exit, gives the onefile bootloader time to clean up, and launches the replacement with `PYINSTALLER_RESET_ENVIRONMENT=1` plus cleared inherited `_PYI_*` variables\n\n### Improved\n\n- Centralized the application version in `version.py` so future release version bumps no longer require editing the main GUI source\n\n'''
+          if '## v5.2.12' not in text:
+              text = text.replace(marker, marker + section, 1)
+          changelog.write_text(text, encoding='utf-8')
+
+          release = Path('.github/workflows/release.yml')
+          text = release.read_text(encoding='utf-8')
+          text = text.replace('description: "Release tag, e.g. v5.2.11"', 'description: "Release tag, e.g. v5.2.12"')
+          text = text.replace('default: "v5.2.11"', 'default: "v5.2.12"')
+          text = text.replace('InvoiceManager Windows x64 版本。v5.2.11 重构设置界面：左侧分类为‘通用、邮箱与发票、备份与恢复、更新与关于’；坚果云配置与恢复统一进入设置；主界面‘更多’仅保留设置、刷新发票文件夹和导出 Excel；更新页新增可点击 GitHub 项目地址与 Star 入口。下载 InvoiceManager-Windows-x64.exe，放入发票 PDF 文件夹后直接双击运行。Release 同时提供 SHA256SUMS.txt 用于校验下载文件。', 'InvoiceManager Windows x64 版本。v5.2.12 修复程序内更新后偶发的 PyInstaller onefile `_MEI` 临时目录 / `python312.dll` 启动错误，并保留 v5.2.11 的分类设置界面。下载 InvoiceManager-Windows-x64.exe，放入发票 PDF 文件夹后直接双击运行。Release 同时提供 SHA256SUMS.txt 用于校验下载文件。')
+          release.write_text(text, encoding='utf-8')
+          PY
+
+      - name: Commit changes
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app.py README.md CHANGELOG.md .github/workflows/release.yml
+          git commit -m "Fix updater restart for v5.2.12"
+          git push
