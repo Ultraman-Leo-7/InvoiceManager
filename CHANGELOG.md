@@ -2,7 +2,9 @@
 
 All notable changes to InvoiceManager will be documented here.
 
-## v5.2 (in development)
+## v5.2.9 (in development)
+
+> Historical note: early automated releases `v5.2.1` through `v5.2.8` used the GitHub Actions run number as the patch component. Starting with `v5.2.9`, versions are assigned deliberately and will remain monotonic.
 
 ### Added
 
@@ -28,6 +30,7 @@ All notable changes to InvoiceManager will be documented here.
 - SHA256 checksum file published with Windows releases
 - InvoiceManager application icon used by Windows builds
 - Unit tests for purchase matching and QQ/JD helper logic
+- Authorization-code protection round-trip test
 - Release build gate: syntax check, import check and pytest must pass before packaging
 - CI on both `main` pushes and Pull Requests
 - Explicit release workflow with a user-supplied semantic version tag and pre-release switch
@@ -38,6 +41,8 @@ All notable changes to InvoiceManager will be documented here.
 - `CONTRIBUTING.md`
 - `SECURITY.md`
 - `PRIVACY.md` describing local storage, network access and authorization-code handling
+- `SUPPORT.md`
+- `docs/TROUBLESHOOTING.md`
 - `docs/RELEASE.md` documenting the repeatable release process
 - Privacy-safe `.gitignore`
 
@@ -50,6 +55,7 @@ All notable changes to InvoiceManager will be documented here.
 - README now contains both a beginner quick-start section and a detailed feature/implementation reference
 - Release files can be verified using `SHA256SUMS.txt`
 - Normal code pushes no longer create a new GitHub pre-release; CI and release publication are separated to avoid cluttering the Releases page
+- Release numbering no longer uses `GITHUB_RUN_NUMBER`; the next canonical test version is `v5.2.9-beta.1`
 
 ### Known limitations
 
@@ -58,6 +64,12 @@ All notable changes to InvoiceManager will be documented here.
 - JD Mail parsing depends on the current sender/subject/HTML structure
 - Purchase matching currently uses price only; equal-price items may require manual review
 - Windows releases are not code-signed yet
+
+## v5.2.1 ~ v5.2.8 (early automated pre-releases)
+
+- These tags were generated automatically while the GitHub Actions packaging workflow was being validated.
+- The patch number reflected the workflow run count, not a deliberately managed sequence of product patch releases.
+- `v5.2.8` was the final release created under that automatic numbering scheme.
 
 ## v5.1
 
