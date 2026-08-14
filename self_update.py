@@ -117,25 +117,44 @@ def _ps_quote(value: str) -> str:
 
 
 def schedule_windows_replacement(current_exe: Path, downloaded_exe: Path) -> None:
-    """Wait for the running exe to exit, replace it, then relaunch it.
+    """Replace a running PyInstaller onefile executable and relaunch it safely.
 
-    The paths are passed to PowerShell as Unicode command-line arguments instead of
-    being stored in a cmd file, so folders containing Chinese characters are safe.
+    A PyInstaller onefile process exports internal ``_PYI_*`` environment
+    variables. If the replacement executable is launched from a helper process
+    that inherited those variables, PyInstaller can mistake the new launch for
+    a child process of the old instance and try to reuse the old ``_MEI``
+    extraction directory. The old instance then removes that directory while
+    exiting, which can produce errors such as ``Failed to load Python DLL``.
+
+    The helper therefore waits for the Python application process to exit,
+    replaces the executable, and sets ``PYINSTALLER_RESET_ENVIRONMENT=1`` before
+    launching the new executable so it creates an independent extraction
+    environment.
     """
     if os.name != "nt":
         raise RuntimeError("自动替换程序目前只支持 Windows")
+
     current_exe = current_exe.resolve()
     downloaded_exe = downloaded_exe.resolve()
     old = _ps_quote(str(current_exe))
     new = _ps_quote(str(downloaded_exe))
+    workdir = _ps_quote(str(current_exe.parent))
+    app_pid = os.getpid()
+
     command = (
-        f"$old={old}; $new={new}; "
+        f"$old={old}; $new={new}; $workdir={workdir}; $appPid={app_pid}; "
+        "Wait-Process -Id $appPid -Timeout 30 -ErrorAction SilentlyContinue; "
+        "Start-Sleep -Milliseconds 800; "
         "$ok=$false; "
-        "for($i=0; $i -lt 40; $i++){ "
+        "for($i=0; $i -lt 60; $i++){ "
         "  try { Move-Item -LiteralPath $new -Destination $old -Force -ErrorAction Stop; $ok=$true; break } "
         "  catch { Start-Sleep -Milliseconds 500 } "
         "}; "
-        "if($ok){ Start-Process -FilePath $old } else { exit 1 }"
+        "if(-not $ok){ exit 1 }; "
+        "$env:PYINSTALLER_RESET_ENVIRONMENT='1'; "
+        "Remove-Item Env:_PYI_ARCHIVE_FILE -ErrorAction SilentlyContinue; "
+        "Remove-Item Env:_PYI_APPLICATION_HOME_DIR -ErrorAction SilentlyContinue; "
+        "Start-Process -FilePath $old -WorkingDirectory $workdir"
     )
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     subprocess.Popen(
