@@ -27,7 +27,10 @@ def parse_version(text: str) -> tuple[int, int, int] | None:
 
 
 def _get_json(url: str, timeout: int = 20):
-    req = urllib.request.Request(url, headers={"User-Agent": "InvoiceManager", "Accept": "application/vnd.github+json"})
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": "InvoiceManager", "Accept": "application/vnd.github+json"},
+    )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
@@ -109,14 +112,34 @@ def download_verified_update(release: dict, directory: Path) -> Path:
     return target
 
 
-def schedule_windows_replacement(current_exe: Path, downloaded_exe: Path) -> Path:
+def _ps_quote(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def schedule_windows_replacement(current_exe: Path, downloaded_exe: Path) -> None:
+    """Wait for the running exe to exit, replace it, then relaunch it.
+
+    The paths are passed to PowerShell as Unicode command-line arguments instead of
+    being stored in a cmd file, so folders containing Chinese characters are safe.
+    """
     if os.name != "nt":
         raise RuntimeError("自动替换程序目前只支持 Windows")
     current_exe = current_exe.resolve()
     downloaded_exe = downloaded_exe.resolve()
-    script = current_exe.parent / ".invoice_manager_update.cmd"
-    content = f'''@echo off\r\nsetlocal\r\nset "OLD={current_exe}"\r\nset "NEW={downloaded_exe}"\r\nfor /L %%I in (1,1,30) do (\r\n  move /Y "%NEW%" "%OLD%" >nul 2>nul && goto :updated\r\n  timeout /t 1 /nobreak >nul\r\n)\r\nexit /b 1\r\n:updated\r\nstart "" "%OLD%"\r\ndel "%~f0"\r\n'''
-    script.write_text(content, encoding="utf-8")
+    old = _ps_quote(str(current_exe))
+    new = _ps_quote(str(downloaded_exe))
+    command = (
+        f"$old={old}; $new={new}; "
+        "$ok=$false; "
+        "for($i=0; $i -lt 40; $i++){ "
+        "  try { Move-Item -LiteralPath $new -Destination $old -Force -ErrorAction Stop; $ok=$true; break } "
+        "  catch { Start-Sleep -Milliseconds 500 } "
+        "}; "
+        "if($ok){ Start-Process -FilePath $old } else { exit 1 }"
+    )
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    subprocess.Popen(["cmd.exe", "/c", str(script)], cwd=str(current_exe.parent), creationflags=creationflags)
-    return script
+    subprocess.Popen(
+        ["powershell.exe", "-NoProfile", "-WindowStyle", "Hidden", "-Command", command],
+        cwd=str(current_exe.parent),
+        creationflags=creationflags,
+    )
