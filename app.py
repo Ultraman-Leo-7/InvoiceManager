@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""InvoiceManager v5.2.10 GUI."""
+"""InvoiceManager v5.2.11 GUI."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ import subprocess
 import sys
 import threading
 import traceback
+import webbrowser
 from ctypes import wintypes
 from datetime import datetime
 from pathlib import Path
@@ -53,11 +54,12 @@ from purchase_tracker import (
 from self_update import download_verified_update, latest_release, schedule_windows_replacement
 
 APP_TITLE = "InvoiceManager"
-APP_VERSION = "5.2.10"
+APP_VERSION = "5.2.11"
 DB_FILENAME = ".invoice_manager.db"
 EXPORT_FILENAME = "发票汇总.xlsx"
 FOLDER_POLL_MS = 2000
 LOCAL_BACKUP_DIRNAME = ".invoice_manager_backups"
+PROJECT_URL = "https://github.com/Ultraman-Leo-7/InvoiceManager"
 
 
 def app_dir() -> Path:
@@ -473,8 +475,6 @@ class InvoiceApp(tk.Tk):
         more_menu.add_separator()
         more_menu.add_command(label="刷新发票文件夹", command=self.run_background_sync)
         more_menu.add_command(label="导出 Excel", command=self.do_export)
-        more_menu.add_command(label="数据备份与恢复", command=self.open_backup_dialog)
-        more_menu.add_command(label="检查更新", command=self.check_for_updates)
         more_button["menu"] = more_menu
         more_button.pack(side="left", padx=(8, 0))
 
@@ -1264,69 +1264,421 @@ class InvoiceApp(tk.Tk):
 
     def open_settings(self):
         win = tk.Toplevel(self)
-        win.title("设置")
+        win.title(f"设置 - {APP_TITLE}")
         win.transient(self)
         win.grab_set()
-        win.geometry("620x650")
-        outer = ttk.Frame(win, padding=14)
-        outer.pack(fill="both", expand=True)
+        win.geometry("920x680")
+        win.minsize(840, 600)
 
-        ttk.Label(outer, text="QQ邮箱（京东发票获取）").pack(anchor="w")
-        email_var = tk.StringVar(value=get_setting("qq_email", ""))
-        ttk.Label(outer, text="QQ邮箱").pack(anchor="w", pady=(10, 2))
-        ttk.Entry(outer, textvariable=email_var).pack(fill="x")
-        ttk.Label(outer, text="QQ邮箱16位授权码").pack(anchor="w", pady=(10, 2))
-        auth_var = tk.StringVar()
-        ttk.Entry(outer, textvariable=auth_var, show="•").pack(fill="x")
-        has_saved_auth = bool(get_setting("qq_auth_code", ""))
-        auth_tip = "已保存授权码；此处留空将继续使用原授权码。" if has_saved_auth else "尚未保存授权码。"
-        ttk.Label(outer, text=auth_tip + " Windows 下使用 DPAPI 加密保存。").pack(anchor="w", pady=(3, 8))
+        root = ttk.Frame(win, padding=12)
+        root.pack(fill="both", expand=True)
+        root.columnconfigure(1, weight=1)
+        root.rowconfigure(0, weight=1)
 
-        ttk.Separator(outer).pack(fill="x", pady=8)
-        ttk.Label(outer, text="发票表显示字段").pack(anchor="w", pady=(4, 6))
+        sidebar = ttk.Frame(root, padding=(0, 0, 12, 0))
+        sidebar.grid(row=0, column=0, sticky="ns")
+        ttk.Label(sidebar, text="设置", font=("Microsoft YaHei UI", 14, "bold")).pack(anchor="w", padx=6, pady=(2, 10))
+        nav = ttk.Treeview(sidebar, show="tree", selectmode="browse", height=10)
+        nav.column("#0", width=160, minwidth=150, stretch=False)
+        nav.pack(fill="y", expand=True)
+
+        categories = [
+            ("general", "通用"),
+            ("mail", "邮箱与发票"),
+            ("backup", "备份与恢复"),
+            ("update", "更新与关于"),
+        ]
+        for key, label in categories:
+            nav.insert("", "end", iid=key, text=label)
+
+        content = ttk.Frame(root, padding=(16, 4, 4, 4))
+        content.grid(row=0, column=1, sticky="nsew")
+        content.columnconfigure(0, weight=1)
+        content.rowconfigure(1, weight=1)
+
+        title_var = tk.StringVar(value="通用")
+        ttk.Label(content, textvariable=title_var, font=("Microsoft YaHei UI", 14, "bold")).grid(
+            row=0, column=0, sticky="w", pady=(0, 12)
+        )
+        page_host = ttk.Frame(content)
+        page_host.grid(row=1, column=0, sticky="nsew")
+        page_host.columnconfigure(0, weight=1)
+        page_host.rowconfigure(0, weight=1)
+
+        pages = {}
+        for key, _label in categories:
+            page = ttk.Frame(page_host)
+            page.grid(row=0, column=0, sticky="nsew")
+            page.grid_remove()
+            pages[key] = page
+
+        # ---- 通用 ----
         current = set(selected_fields())
         field_vars = {}
-        fields_box = ttk.Frame(outer)
-        fields_box.pack(fill="both", expand=True)
-        for field in AVAILABLE_FIELDS:
+        general = pages["general"]
+        display_box = ttk.LabelFrame(general, text="发票列表", padding=12)
+        display_box.pack(fill="x")
+        ttk.Label(
+            display_box,
+            text="选择主表要显示的字段。搜索范围会自动跟随当前显示字段，不再展示隐藏字段。",
+            wraplength=640,
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
+        for idx, field in enumerate(AVAILABLE_FIELDS):
             var = tk.BooleanVar(value=field in current)
             field_vars[field] = var
-            ttk.Checkbutton(fields_box, text=field, variable=var).pack(anchor="w")
+            ttk.Checkbutton(display_box, text=field, variable=var).grid(
+                row=1 + idx // 2,
+                column=idx % 2,
+                sticky="w",
+                padx=(0, 26),
+                pady=3,
+            )
+        display_box.columnconfigure(0, weight=1)
+        display_box.columnconfigure(1, weight=1)
 
-        buttons = ttk.Frame(outer)
-        buttons.pack(fill="x", pady=(10, 0))
+        behavior_box = ttk.LabelFrame(general, text="工作方式", padding=12)
+        behavior_box.pack(fill="x", pady=(14, 0))
+        ttk.Label(
+            behavior_box,
+            text="发票文件夹会自动监控并刷新。手动刷新只是故障排查或需要立即重扫时的备用操作，因此留在“更多”菜单中。",
+            wraplength=640,
+        ).pack(anchor="w")
+        ttk.Label(
+            behavior_box,
+            text="Excel 只作为按需导出结果，不是主数据库。",
+            wraplength=640,
+        ).pack(anchor="w", pady=(6, 0))
 
-        def save():
-            fields = [f for f, v in field_vars.items() if v.get()]
-            if not fields:
-                messagebox.showwarning(APP_TITLE, "至少选择一个显示字段。", parent=win)
-                return
-            email_addr = email_var.get().strip()
-            if email_addr and "@" not in email_addr:
-                messagebox.showwarning(APP_TITLE, "QQ邮箱格式看起来不正确。", parent=win)
-                return
-            try:
-                with connect_db() as conn:
-                    set_setting_conn(conn, "qq_email", email_addr)
-                    set_setting_conn(conn, "selected_fields", json.dumps(fields, ensure_ascii=False))
-                    if auth_var.get().strip():
-                        set_setting_conn(conn, "qq_auth_code", protect_secret(auth_var.get().strip()))
-            except Exception as e:
-                messagebox.showerror(APP_TITLE, f"保存设置失败：{type(e).__name__}: {e}", parent=win)
-                return
-            win.destroy()
-            self.refresh_all()
-            self.set_status("设置已保存")
-            self.schedule_auto_cloud_backup()
+        # ---- 邮箱与发票 ----
+        mail = pages["mail"]
+        email_box = ttk.LabelFrame(mail, text="QQ 邮箱 · 京东电子发票", padding=12)
+        email_box.pack(fill="x")
+        ttk.Label(
+            email_box,
+            text="用于从 QQ 邮箱收件箱获取京东电子发票。这里需要 QQ 邮箱生成的 16 位授权码，不是 QQ 登录密码。",
+            wraplength=640,
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
+        ttk.Label(email_box, text="QQ 邮箱").grid(row=1, column=0, sticky="w", pady=4)
+        email_var = tk.StringVar(value=get_setting("qq_email", ""))
+        ttk.Entry(email_box, textvariable=email_var).grid(row=1, column=1, sticky="ew", padx=(12, 0), pady=4)
+        ttk.Label(email_box, text="16 位授权码").grid(row=2, column=0, sticky="w", pady=4)
+        auth_var = tk.StringVar()
+        ttk.Entry(email_box, textvariable=auth_var, show="•").grid(row=2, column=1, sticky="ew", padx=(12, 0), pady=4)
+        auth_saved_var = tk.StringVar()
+
+        def refresh_auth_tip():
+            has_saved = bool(get_setting("qq_auth_code", ""))
+            auth_saved_var.set(
+                ("已保存授权码；输入框留空会继续使用原授权码。" if has_saved else "尚未保存授权码。")
+                + " Windows 下使用 DPAPI 加密保存。"
+            )
+
+        refresh_auth_tip()
+        ttk.Label(email_box, textvariable=auth_saved_var, wraplength=520).grid(
+            row=3, column=1, sticky="w", padx=(12, 0), pady=(2, 8)
+        )
+        email_box.columnconfigure(1, weight=1)
 
         def clear_auth():
             if messagebox.askyesno(APP_TITLE, "确定清除已保存的 QQ 邮箱授权码？", parent=win):
                 set_setting("qq_auth_code", "")
                 auth_var.set("")
+                refresh_auth_tip()
+                settings_status_var.set("已清除 QQ 邮箱授权码。")
 
-        ttk.Button(buttons, text="保存", command=save).pack(side="right")
-        ttk.Button(buttons, text="取消", command=win.destroy).pack(side="right", padx=(0, 6))
-        ttk.Button(buttons, text="清除授权码", command=clear_auth).pack(side="left")
+        ttk.Button(email_box, text="清除已保存授权码", command=clear_auth).grid(
+            row=4, column=1, sticky="w", padx=(12, 0), pady=(2, 0)
+        )
+
+        # ---- 备份与恢复 ----
+        backup = pages["backup"]
+        backup_box = ttk.LabelFrame(backup, text="坚果云 WebDAV", padding=12)
+        backup_box.pack(fill="x")
+        ttk.Label(
+            backup_box,
+            text="配置一次后即可自动备份。云端备份包含购买记录、人工确认、备注、显示设置等；PDF 发票本身不会上传。",
+            wraplength=640,
+        ).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 8))
+        ttk.Label(
+            backup_box,
+            text="QQ 授权码和坚果云应用密码属于设备密钥，不写入云端备份；换电脑恢复后需要重新填写。",
+            wraplength=640,
+        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 10))
+
+        nut_email_var = tk.StringVar(value=get_setting("nutstore_email", ""))
+        nut_pass_var = tk.StringVar()
+        nut_auto_var = tk.BooleanVar(value=get_setting("nutstore_auto_backup", "1") == "1")
+        nut_saved_var = tk.StringVar()
+
+        def refresh_nut_tip():
+            has_saved = bool(get_setting("nutstore_app_password", ""))
+            nut_saved_var.set(
+                ("已保存应用密码；输入框留空会继续使用原密码。" if has_saved else "尚未保存应用密码。")
+                + " Windows 下使用 DPAPI 加密保存。"
+            )
+
+        refresh_nut_tip()
+        ttk.Label(backup_box, text="坚果云账号邮箱").grid(row=2, column=0, sticky="w", pady=4)
+        ttk.Entry(backup_box, textvariable=nut_email_var).grid(row=2, column=1, columnspan=2, sticky="ew", padx=(12, 0), pady=4)
+        ttk.Label(backup_box, text="第三方应用密码").grid(row=3, column=0, sticky="w", pady=4)
+        ttk.Entry(backup_box, textvariable=nut_pass_var, show="•").grid(row=3, column=1, columnspan=2, sticky="ew", padx=(12, 0), pady=4)
+        ttk.Label(backup_box, textvariable=nut_saved_var, wraplength=520).grid(
+            row=4, column=1, columnspan=2, sticky="w", padx=(12, 0), pady=(2, 6)
+        )
+        ttk.Checkbutton(
+            backup_box,
+            text="数据变化后自动备份到坚果云（推荐）",
+            variable=nut_auto_var,
+        ).grid(row=5, column=1, columnspan=2, sticky="w", padx=(12, 0), pady=(2, 8))
+        backup_box.columnconfigure(1, weight=1)
+
+        last = get_setting("nutstore_last_backup", "")
+        last_text = last.replace("T", " ")[:19] if last else "尚无成功备份"
+        last_error = get_setting("nutstore_last_backup_error", "")
+        backup_status_var = tk.StringVar(
+            value=f"最近成功备份：{last_text}" + (f"\n最近失败：{last_error}" if last_error else "")
+        )
+        ttk.Label(backup_box, textvariable=backup_status_var, wraplength=640).grid(
+            row=6, column=0, columnspan=3, sticky="w", pady=(4, 8)
+        )
+
+        # ---- 更新与关于 ----
+        update = pages["update"]
+        update_box = ttk.LabelFrame(update, text="软件更新", padding=12)
+        update_box.pack(fill="x")
+        ttk.Label(update_box, text=f"当前版本：v{APP_VERSION}", font=("Microsoft YaHei UI", 10, "bold")).pack(anchor="w")
+        ttk.Label(
+            update_box,
+            text="默认不会在启动时自动联网检查更新。需要时手动点击下面的按钮即可。",
+            wraplength=640,
+        ).pack(anchor="w", pady=(6, 10))
+        ttk.Button(update_box, text="检查更新", command=self.check_for_updates).pack(anchor="w")
+
+        about_box = ttk.LabelFrame(update, text="项目与反馈", padding=12)
+        about_box.pack(fill="x", pady=(14, 0))
+        ttk.Label(about_box, text="GitHub 项目主页").pack(anchor="w")
+        link = tk.Label(
+            about_box,
+            text=PROJECT_URL,
+            fg="#0969da",
+            cursor="hand2",
+            font=("Microsoft YaHei UI", 9, "underline"),
+        )
+        link.pack(anchor="w", pady=(4, 8))
+        link.bind("<Button-1>", lambda _e: webbrowser.open(PROJECT_URL))
+        ttk.Button(
+            about_box,
+            text="打开 GitHub 项目主页",
+            command=lambda: webbrowser.open(PROJECT_URL),
+        ).pack(anchor="w")
+        ttk.Separator(about_box).pack(fill="x", pady=12)
+        ttk.Label(
+            about_box,
+            text="如果觉得好用，欢迎给个 Star ⭐ 喵～  ฅ^•ﻌ•^ฅ",
+            font=("Microsoft YaHei UI", 10),
+        ).pack(anchor="w")
+        ttk.Button(
+            about_box,
+            text="去 GitHub 给个 Star ⭐",
+            command=lambda: webbrowser.open(PROJECT_URL),
+        ).pack(anchor="w", pady=(8, 0))
+
+        settings_status_var = tk.StringVar(value="")
+
+        def save_all(show_status=True):
+            fields = [f for f, v in field_vars.items() if v.get()]
+            if not fields:
+                messagebox.showwarning(APP_TITLE, "至少选择一个显示字段。", parent=win)
+                return False
+            qq_email = email_var.get().strip()
+            if qq_email and "@" not in qq_email:
+                messagebox.showwarning(APP_TITLE, "QQ 邮箱格式看起来不正确。", parent=win)
+                return False
+            nut_email = nut_email_var.get().strip()
+            if nut_email and "@" not in nut_email:
+                messagebox.showwarning(APP_TITLE, "坚果云账号邮箱格式看起来不正确。", parent=win)
+                return False
+            try:
+                with connect_db() as conn:
+                    set_setting_conn(conn, "selected_fields", json.dumps(fields, ensure_ascii=False))
+                    set_setting_conn(conn, "qq_email", qq_email)
+                    if auth_var.get().strip():
+                        set_setting_conn(conn, "qq_auth_code", protect_secret(auth_var.get().strip()))
+                    set_setting_conn(conn, "nutstore_email", nut_email)
+                    set_setting_conn(conn, "nutstore_auto_backup", "1" if nut_auto_var.get() else "0")
+                    if nut_pass_var.get().strip():
+                        set_setting_conn(conn, "nutstore_app_password", protect_secret(nut_pass_var.get().strip()))
+            except Exception as e:
+                messagebox.showerror(APP_TITLE, f"保存设置失败：{type(e).__name__}: {e}", parent=win)
+                return False
+            refresh_auth_tip()
+            refresh_nut_tip()
+            self.refresh_all()
+            self.schedule_auto_cloud_backup()
+            if show_status:
+                settings_status_var.set("设置已保存。")
+                self.set_status("设置已保存")
+            return True
+
+        def client_from_form() -> NutstoreWebDAV:
+            email = nut_email_var.get().strip()
+            password = nut_pass_var.get().strip()
+            if not password:
+                enc = get_setting("nutstore_app_password", "").strip()
+                if enc:
+                    password = unprotect_secret(enc)
+            if not email or not password:
+                raise ValueError("请填写坚果云账号邮箱和第三方应用密码")
+            return NutstoreWebDAV(email, password)
+
+        def test_connection():
+            if not save_all(show_status=False):
+                return
+            backup_status_var.set("正在测试坚果云连接...")
+
+            def worker():
+                try:
+                    client_from_form().test_connection()
+                    self.after(0, lambda: backup_status_var.set("连接成功。InvoiceManager 备份目录已准备好。"))
+                except Exception as e:
+                    self.after(0, lambda: backup_status_var.set(f"连接失败：{type(e).__name__}: {e}"))
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        def backup_now():
+            if not save_all(show_status=False):
+                return
+            backup_status_var.set("正在备份到坚果云...")
+
+            def worker():
+                try:
+                    name = self._perform_cloud_backup()
+                    text = f"备份成功：{name}"
+                    self.set_status(text)
+                    self.after(0, lambda: backup_status_var.set(text))
+                except Exception as e:
+                    error_text = f"{type(e).__name__}: {e}"
+                    try:
+                        set_setting("nutstore_last_backup_error", error_text)
+                    except Exception:
+                        pass
+                    self.after(0, lambda: backup_status_var.set(f"备份失败：{error_text}"))
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        def restart_after_restore():
+            messagebox.showinfo(
+                APP_TITLE,
+                "恢复完成。程序将重新启动。\n\n为保证跨电脑安全，QQ 邮箱授权码和坚果云应用密码不会从云备份恢复，需要重新填写。",
+                parent=win,
+            )
+            try:
+                subprocess.Popen([sys.executable], cwd=str(BASE_DIR))
+            except Exception:
+                pass
+            self.destroy()
+
+        def show_restore_choice(client: NutstoreWebDAV, history: list[str]):
+            choice_win = tk.Toplevel(win)
+            choice_win.title("选择要恢复的备份")
+            choice_win.transient(win)
+            choice_win.grab_set()
+            choice_win.geometry("560x220")
+            box = ttk.Frame(choice_win, padding=14)
+            box.pack(fill="both", expand=True)
+            values = ["最新备份"] + history
+            choice_var = tk.StringVar(value=values[0])
+            ttk.Label(box, text="选择备份：").pack(anchor="w")
+            ttk.Combobox(box, textvariable=choice_var, values=values, state="readonly").pack(fill="x", pady=(4, 10))
+            ttk.Label(
+                box,
+                text="恢复会先在本机自动保存当前数据库，再替换为所选云端备份。恢复后程序会自动重启。",
+                wraplength=520,
+            ).pack(anchor="w", pady=(0, 10))
+
+            def do_restore():
+                selected = choice_var.get()
+                remote_name = LATEST_NAME if selected == "最新备份" else selected
+                if not messagebox.askyesno(
+                    APP_TITLE,
+                    "确定恢复这个备份？\n\n当前数据库会先自动做本地安全备份。",
+                    parent=choice_win,
+                ):
+                    return
+                choice_win.destroy()
+                backup_status_var.set("正在下载并校验备份...")
+
+                def worker():
+                    snapshot = temporary_snapshot_path(prefix="InvoiceManager-restore-")
+                    try:
+                        client.download_backup(snapshot, remote_name)
+                        restore_snapshot(snapshot, DB_PATH, LOCAL_BACKUP_DIR)
+                        hide_windows_file(DB_PATH)
+                        hide_windows_file(LOCAL_BACKUP_DIR)
+                        self.after(0, restart_after_restore)
+                    except Exception as e:
+                        self.after(0, lambda: backup_status_var.set(f"恢复失败：{type(e).__name__}: {e}"))
+                    finally:
+                        try:
+                            snapshot.unlink()
+                        except OSError:
+                            pass
+
+                threading.Thread(target=worker, daemon=True).start()
+
+            ttk.Button(box, text="恢复", command=do_restore).pack(side="right")
+            ttk.Button(box, text="取消", command=choice_win.destroy).pack(side="right", padx=(0, 6))
+
+        def restore_from_cloud():
+            if not save_all(show_status=False):
+                return
+            backup_status_var.set("正在读取坚果云历史备份...")
+
+            def worker():
+                try:
+                    client = client_from_form()
+                    history = client.list_history()
+                    self.after(0, lambda: show_restore_choice(client, history))
+                except Exception as e:
+                    self.after(0, lambda: backup_status_var.set(f"读取备份失败：{type(e).__name__}: {e}"))
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        def clear_nut_password():
+            if messagebox.askyesno(APP_TITLE, "确定清除已保存的坚果云应用密码？", parent=win):
+                set_setting("nutstore_app_password", "")
+                nut_pass_var.set("")
+                refresh_nut_tip()
+                settings_status_var.set("已清除坚果云应用密码。")
+
+        action_row = ttk.Frame(backup_box)
+        action_row.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(6, 0))
+        ttk.Button(action_row, text="测试连接", command=test_connection).pack(side="left")
+        ttk.Button(action_row, text="立即备份", command=backup_now).pack(side="left", padx=(6, 0))
+        ttk.Button(action_row, text="从坚果云恢复", command=restore_from_cloud).pack(side="left", padx=(6, 0))
+        ttk.Button(action_row, text="清除应用密码", command=clear_nut_password).pack(side="left", padx=(6, 0))
+
+        def show_page(key: str):
+            for page in pages.values():
+                page.grid_remove()
+            pages[key].grid()
+            title_var.set(dict(categories)[key])
+
+        def on_nav(_event=None):
+            selected = nav.selection()
+            if selected:
+                show_page(selected[0])
+
+        nav.bind("<<TreeviewSelect>>", on_nav)
+        nav.selection_set("general")
+        nav.focus("general")
+        show_page("general")
+
+        bottom = ttk.Frame(root, padding=(0, 12, 0, 0))
+        bottom.grid(row=1, column=0, columnspan=2, sticky="ew")
+        ttk.Label(bottom, textvariable=settings_status_var).pack(side="left")
+        ttk.Button(bottom, text="关闭", command=win.destroy).pack(side="right")
+        ttk.Button(bottom, text="保存设置", command=save_all).pack(side="right", padx=(0, 8))
 
     def open_jd_fetch_dialog(self):
         email_addr = get_setting("qq_email", "").strip()
@@ -1436,7 +1788,7 @@ class InvoiceApp(tk.Tk):
         email = get_setting("nutstore_email", "").strip()
         enc = get_setting("nutstore_app_password", "").strip()
         if not email or not enc:
-            raise ValueError("请先在“数据备份”中设置坚果云账号和应用密码")
+            raise ValueError("请先在“设置 → 备份与恢复”中设置坚果云账号和应用密码")
         try:
             password = unprotect_secret(enc)
         except Exception as e:

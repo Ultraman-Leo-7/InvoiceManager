@@ -2,6 +2,17 @@
 
 All notable changes to InvoiceManager will be documented here.
 
+## v5.2.11
+
+### Improved
+
+- Reworked Settings into a sidebar-based layout with four categories: General, Mail & Invoices, Backup & Restore, and Updates & About
+- Moved all Nutstore WebDAV configuration and recovery controls into Settings instead of exposing backup configuration as a separate top-level command
+- Moved update checking into Settings → Updates & About
+- Reduced the main “更多” menu to one-click low-frequency actions only: Settings, manual folder refresh, and Excel export
+- Added a clickable GitHub project address and a friendly Star prompt in the Updates & About page
+- Preserved manual-only update behavior: InvoiceManager still does not check for updates automatically at startup
+
 ## v5.2.10
 
 ### Added
