@@ -1,0 +1,56 @@
+name: 功能建议
+description: 建议 InvoiceManager 增加或改进某项功能
+title: "[Feature] "
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        欢迎提出功能建议。请尽量描述实际使用场景，而不仅仅是“增加某按钮”。
+
+  - type: textarea
+    id: scenario
+    attributes:
+      label: 使用场景
+      description: 你在什么情况下需要这个功能？
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 目前的问题
+      description: 现在的操作哪里不方便？
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 期望方案
+      description: 你希望 InvoiceManager 如何解决？
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: 相关模块
+      options:
+        - PDF 发票解析
+        - 邮箱 / 发票自动获取
+        - 发票管理 GUI
+        - 购买记录
+        - 发票匹配
+        - 搜索 / 排序
+        - 导出
+        - 隐私 / 安全
+        - 安装 / Release
+        - 其他
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: 其他补充
