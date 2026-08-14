@@ -1,21 +1,23 @@
 # -*- coding: utf-8 -*-
 """
-购买记录与发票匹配模块
+购买记录与发票匹配模块。
 
-规则：
-- 用户手动记录购买项
-- 匹配时只比较最终价格（含快递费）
-- 一笔购买对应一张发票
+匹配规则按用户需求保持简单：只比较价格，精确到分，一模一样就算匹配。
+
+重要：京东商品金额和快递费是分别开发票的，因此：
+- 无快递费：一条购买记录需要 1 张“商品价格”发票；
+- 有快递费：一条购买记录需要 2 张发票，分别匹配“商品价格”和“快递费”；
+- 每张发票最多匹配一次，每个购买组成项也最多匹配一张发票。
 """
 
 from __future__ import annotations
 
 import sqlite3
 from datetime import datetime
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 
-
-def init_purchase_table(conn: sqlite3.Connection):
+def init_purchase_table(conn: sqlite3.Connection) -> None:
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS purchases (
@@ -25,75 +27,250 @@ def init_purchase_table(conn: sqlite3.Connection):
             has_shipping INTEGER NOT NULL DEFAULT 0,
             shipping_fee REAL NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL,
-            matched_invoice TEXT
+            updated_at TEXT NOT NULL DEFAULT ''
         )
         """
     )
 
+    # 兼容上一版已经创建的表：如果缺 updated_at，就补上。
+    columns = {
+        str(row[1])
+        for row in conn.execute("PRAGMA table_info(purchases)").fetchall()
+    }
+    if "updated_at" not in columns:
+        conn.execute(
+            "ALTER TABLE purchases ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''"
+        )
 
-def add_purchase(conn, name: str, item_price: float, has_shipping: bool, shipping_fee: float = 0):
-    conn.execute(
+
+def _money_to_cents(value) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        amount = Decimal(str(value)).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+    return int(amount * 100)
+
+
+def validate_purchase(
+    name: str,
+    item_price,
+    has_shipping: bool,
+    shipping_fee=0,
+) -> tuple[str, float, bool, float]:
+    name = str(name or "").strip()
+    if not name:
+        raise ValueError("名称不能为空")
+
+    item_cents = _money_to_cents(item_price)
+    if item_cents is None or item_cents < 0:
+        raise ValueError("商品价格必须是大于等于 0 的数字")
+
+    shipping_cents = _money_to_cents(shipping_fee)
+    if has_shipping:
+        if shipping_cents is None or shipping_cents < 0:
+            raise ValueError("勾选快递费后，快递费必须是大于等于 0 的数字")
+    else:
+        shipping_cents = 0
+
+    return (
+        name,
+        item_cents / 100,
+        bool(has_shipping),
+        shipping_cents / 100,
+    )
+
+
+def add_purchase(
+    conn: sqlite3.Connection,
+    name: str,
+    item_price,
+    has_shipping: bool,
+    shipping_fee=0,
+) -> int:
+    name, item_price, has_shipping, shipping_fee = validate_purchase(
+        name, item_price, has_shipping, shipping_fee
+    )
+    now = datetime.now().isoformat(timespec="seconds")
+    cur = conn.execute(
         """
         INSERT INTO purchases(
-            name,item_price,has_shipping,shipping_fee,created_at
-        ) VALUES(?,?,?,?,?)
+            name, item_price, has_shipping, shipping_fee, created_at, updated_at
+        ) VALUES(?,?,?,?,?,?)
         """,
         (
             name,
             item_price,
             1 if has_shipping else 0,
-            shipping_fee if has_shipping else 0,
+            shipping_fee,
+            now,
+            now,
+        ),
+    )
+    return int(cur.lastrowid)
+
+
+def update_purchase(
+    conn: sqlite3.Connection,
+    purchase_id: int,
+    name: str,
+    item_price,
+    has_shipping: bool,
+    shipping_fee=0,
+) -> None:
+    name, item_price, has_shipping, shipping_fee = validate_purchase(
+        name, item_price, has_shipping, shipping_fee
+    )
+    conn.execute(
+        """
+        UPDATE purchases
+        SET name=?, item_price=?, has_shipping=?, shipping_fee=?, updated_at=?
+        WHERE id=?
+        """,
+        (
+            name,
+            item_price,
+            1 if has_shipping else 0,
+            shipping_fee,
             datetime.now().isoformat(timespec="seconds"),
+            int(purchase_id),
         ),
     )
 
 
-def delete_purchase(conn, purchase_id: int):
-    conn.execute("DELETE FROM purchases WHERE id=?", (purchase_id,))
+def delete_purchase(conn: sqlite3.Connection, purchase_id: int) -> None:
+    conn.execute("DELETE FROM purchases WHERE id=?", (int(purchase_id),))
 
 
-def clear_purchases(conn):
+def clear_purchases(conn: sqlite3.Connection) -> None:
     conn.execute("DELETE FROM purchases")
 
 
-def purchase_total(row):
-    return round(row["item_price"] + row["shipping_fee"], 2) if row["has_shipping"] else round(row["item_price"], 2)
-
-
-def match_purchases(conn):
-    """
-    返回：
-    matched: 已找到对应发票的购买记录
-    unmatched: 有购买记录但没有发票
-    unused_invoice: 有发票但没有对应购买记录
-    """
-    purchases = conn.execute(
+def list_purchases(conn: sqlite3.Connection):
+    return conn.execute(
         "SELECT * FROM purchases ORDER BY id"
     ).fetchall()
+
+
+def get_purchase(conn: sqlite3.Connection, purchase_id: int):
+    return conn.execute(
+        "SELECT * FROM purchases WHERE id=?", (int(purchase_id),)
+    ).fetchone()
+
+
+def required_components(purchase) -> list[dict]:
+    """把一条购买记录拆成需要匹配的发票组成项。"""
+    components = [
+        {
+            "kind": "商品",
+            "price": float(purchase["item_price"]),
+            "cents": _money_to_cents(purchase["item_price"]),
+        }
+    ]
+    if int(purchase["has_shipping"] or 0):
+        components.append(
+            {
+                "kind": "快递费",
+                "price": float(purchase["shipping_fee"]),
+                "cents": _money_to_cents(purchase["shipping_fee"]),
+            }
+        )
+    return components
+
+
+def match_purchases(conn: sqlite3.Connection) -> dict:
+    """
+    一对一价格匹配。
+
+    返回：
+      purchase_results: 每条购买记录及其商品/快递费匹配情况
+      invoice_match_map: digest -> 匹配信息，用于发票表显示“✓”
+      missing_components: 记录了购买，但还缺发票的组成项
+      unused_invoices: 有发票，但没有对应购买组成项
+
+    当存在多个完全相同价格时，按购买记录 id、发票文件名顺序依次配对。
+    """
+    purchases = list_purchases(conn)
     invoices = conn.execute(
-        "SELECT * FROM invoices WHERE active=1 ORDER BY digest"
+        """
+        SELECT * FROM invoices
+        WHERE active=1
+        ORDER BY filename COLLATE NOCASE, digest
+        """
     ).fetchall()
 
-    used = set()
-    matched = []
-    unmatched = []
+    # 价格 -> 尚未使用的发票列表
+    by_price: dict[int, list] = {}
+    for inv in invoices:
+        cents = _money_to_cents(inv["total"])
+        if cents is None:
+            continue
+        by_price.setdefault(cents, []).append(inv)
 
-    for p in purchases:
-        target = purchase_total(p)
-        found = None
-        for inv in invoices:
-            if inv["digest"] in used:
-                continue
-            if inv["total"] is not None and round(inv["total"], 2) == target:
-                found = inv
-                break
+    used_digests: set[str] = set()
+    invoice_match_map: dict[str, dict] = {}
+    purchase_results: list[dict] = []
+    missing_components: list[dict] = []
 
-        if found:
-            used.add(found["digest"])
-            matched.append((p, found))
-        else:
-            unmatched.append(p)
+    for purchase in purchases:
+        component_results = []
 
-    unused_invoice = [x for x in invoices if x["digest"] not in used]
+        for component in required_components(purchase):
+            found = None
+            candidates = by_price.get(component["cents"], [])
+            while candidates:
+                candidate = candidates.pop(0)
+                digest = str(candidate["digest"])
+                if digest not in used_digests:
+                    found = candidate
+                    break
 
-    return matched, unmatched, unused_invoice
+            component_result = {
+                "kind": component["kind"],
+                "price": component["price"],
+                "invoice": found,
+                "matched": found is not None,
+            }
+            component_results.append(component_result)
+
+            if found is not None:
+                digest = str(found["digest"])
+                used_digests.add(digest)
+                invoice_match_map[digest] = {
+                    "purchase_id": int(purchase["id"]),
+                    "purchase_name": str(purchase["name"]),
+                    "kind": component["kind"],
+                    "price": component["price"],
+                }
+            else:
+                missing_components.append(
+                    {
+                        "purchase_id": int(purchase["id"]),
+                        "purchase_name": str(purchase["name"]),
+                        "kind": component["kind"],
+                        "price": component["price"],
+                    }
+                )
+
+        purchase_results.append(
+            {
+                "purchase": purchase,
+                "components": component_results,
+                "complete": all(x["matched"] for x in component_results),
+            }
+        )
+
+    unused_invoices = [
+        inv for inv in invoices
+        if str(inv["digest"]) not in used_digests
+    ]
+
+    return {
+        "purchase_results": purchase_results,
+        "invoice_match_map": invoice_match_map,
+        "missing_components": missing_components,
+        "unused_invoices": unused_invoices,
+    }
