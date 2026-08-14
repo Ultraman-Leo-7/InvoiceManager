@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release tag, e.g. v5.2.0-beta.1 or v5.2.0"
+        description: "Release tag, e.g. v5.2.9-beta.1 or v5.2.9"
         required: true
-        default: "v5.2.0-beta.1"
+        default: "v5.2.9-beta.1"
         type: string
       prerelease:
         description: "Publish as a pre-release"
