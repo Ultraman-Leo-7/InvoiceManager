@@ -25,7 +25,7 @@ All notable changes to InvoiceManager will be documented here.
 - Batch deletion of PDF invoices from both disk and UI
 - SQLite persistence for parsed data and manual state
 - Excel export for invoices and purchase records
-- Automatic Windows x64 builds with GitHub Actions
+- Windows x64 release builds with GitHub Actions
 - Stable release asset name: `InvoiceManager-Windows-x64.exe`
 - SHA256 checksum file published with Windows releases
 - InvoiceManager application icon used by Windows builds
@@ -33,7 +33,7 @@ All notable changes to InvoiceManager will be documented here.
 - Authorization-code protection round-trip test
 - Release build gate: syntax check, import check and pytest must pass before packaging
 - CI on both `main` pushes and Pull Requests
-- Explicit release workflow with a user-supplied semantic version tag and pre-release switch
+- Explicit release workflow with a user-supplied version tag
 - Dependabot for Python and GitHub Actions dependencies
 - Public Bug Issue template
 - Public Feature Request template
@@ -45,6 +45,7 @@ All notable changes to InvoiceManager will be documented here.
 - `docs/TROUBLESHOOTING.md`
 - `docs/RELEASE.md` documenting the repeatable release process
 - Privacy-safe `.gitignore`
+- MIT License
 
 ### Improved
 
@@ -52,10 +53,10 @@ All notable changes to InvoiceManager will be documented here.
 - Manual confirmation and notes survive PDF refreshes
 - Purchase matching results are visible from both invoice and purchase views
 - Release naming and documentation are more suitable for public users
-- README now contains both a beginner quick-start section and a detailed feature/implementation reference
+- README contains both a beginner quick-start section and a detailed feature/implementation reference
 - Release files can be verified using `SHA256SUMS.txt`
-- Normal code pushes no longer create a new GitHub pre-release; CI and release publication are separated to avoid cluttering the Releases page
-- Release numbering no longer uses `GITHUB_RUN_NUMBER`; the next canonical test version is `v5.2.9-beta.1`
+- Normal code pushes no longer create a new GitHub Release; CI and release publication are separated to avoid cluttering the Releases page
+- Release numbering no longer uses `GITHUB_RUN_NUMBER`; versions now advance simply, e.g. `v5.2.8 → v5.2.9 → v5.2.10`
 
 ### Known limitations
 
@@ -65,7 +66,7 @@ All notable changes to InvoiceManager will be documented here.
 - Purchase matching currently uses price only; equal-price items may require manual review
 - Windows releases are not code-signed yet
 
-## v5.2.1 ~ v5.2.8 (early automated pre-releases)
+## v5.2.1 ~ v5.2.8 (early automated releases)
 
 - These tags were generated automatically while the GitHub Actions packaging workflow was being validated.
 - The patch number reflected the workflow run count, not a deliberately managed sequence of product patch releases.
