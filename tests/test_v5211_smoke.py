@@ -5,7 +5,7 @@ import version
 
 
 def test_app_version_comes_from_version_module():
-    assert app.APP_VERSION == version.APP_VERSION == "5.2.12"
+    assert app.APP_VERSION == version.APP_VERSION == "5.2.13"
 
 
 def test_visible_search_scope_label_is_present():
@@ -14,7 +14,7 @@ def test_visible_search_scope_label_is_present():
 
 def test_settings_categories_are_present():
     source = inspect.getsource(app.InvoiceApp.open_settings)
-    for label in ("通用", "邮箱与发票", "备份与恢复", "更新与关于"):
+    for label in ("通用", "邮箱与发票", "备份与恢复", "更新与反馈"):
         assert label in source
 
 

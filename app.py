@@ -1286,7 +1286,7 @@ class InvoiceApp(tk.Tk):
             ("general", "通用"),
             ("mail", "邮箱与发票"),
             ("backup", "备份与恢复"),
-            ("update", "更新与关于"),
+            ("update", "更新与反馈"),
         ]
         for key, label in categories:
             nav.insert("", "end", iid=key, text=label)
@@ -1442,7 +1442,7 @@ class InvoiceApp(tk.Tk):
             row=6, column=0, columnspan=3, sticky="w", pady=(4, 8)
         )
 
-        # ---- 更新与关于 ----
+        # ---- 更新与反馈 ----
         update = pages["update"]
         update_box = ttk.LabelFrame(update, text="软件更新", padding=12)
         update_box.pack(fill="x")

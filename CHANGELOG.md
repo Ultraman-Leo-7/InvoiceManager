@@ -2,6 +2,12 @@
 
 All notable changes to InvoiceManager will be documented here.
 
+## v5.2.13
+
+### Changed
+
+- Renamed the settings category from “更新与关于” to the more natural “更新与反馈”
+
 ## v5.2.12
 
 ### Fixed
