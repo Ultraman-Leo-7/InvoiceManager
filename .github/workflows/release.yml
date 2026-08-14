@@ -4,14 +4,10 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release tag, e.g. v5.2.9"
+        description: "Release tag, e.g. v5.2.10"
         required: true
-        default: "v5.2.9"
+        default: "v5.2.10"
         type: string
-  push:
-    branches: [main]
-    paths:
-      - ".github/release-v5.2.9.trigger"
 
 permissions:
   contents: write
@@ -86,7 +82,7 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_VERSION: ${{ github.event.inputs.version || 'v5.2.9' }}
+          RELEASE_VERSION: ${{ inputs.version }}
         run: |
           if ($env:RELEASE_VERSION -notmatch '^v\d+\.\d+\.\d+$') {
             throw "Invalid version format: $env:RELEASE_VERSION"
@@ -97,4 +93,4 @@ jobs:
             "dist/SHA256SUMS.txt" `
             --target "$env:GITHUB_SHA" `
             --title "InvoiceManager $env:RELEASE_VERSION" `
-            --notes "InvoiceManager Windows x64 版本。下载 InvoiceManager-Windows-x64.exe，放入发票 PDF 文件夹后直接双击运行。该版本新增程序内手动更新、坚果云 WebDAV 数据备份/恢复、购买记录总金额、本地安全快照与购买记录审计历史。Release 同时提供 SHA256SUMS.txt 用于校验下载文件。"
+            --notes "InvoiceManager Windows x64 版本。下载 InvoiceManager-Windows-x64.exe，放入发票 PDF 文件夹后直接双击运行。Release 同时提供 SHA256SUMS.txt 用于校验下载文件。"
