@@ -27,7 +27,12 @@ All notable changes to InvoiceManager will be documented here.
 - Stable release asset name: `InvoiceManager-Windows-x64.exe`
 - SHA256 checksum file published with Windows releases
 - InvoiceManager application icon used by Windows builds
+- Unit tests for purchase matching and QQ/JD helper logic
+- Release build gate: syntax check, import check and pytest must pass before packaging
+- Pull Request CI workflow on Windows
+- Dependabot for Python and GitHub Actions dependencies
 - Public Bug Issue template
+- Public Feature Request template
 - `CONTRIBUTING.md`
 - `SECURITY.md`
 - Privacy-safe `.gitignore`
@@ -39,6 +44,7 @@ All notable changes to InvoiceManager will be documented here.
 - Purchase matching results are visible from both invoice and purchase views
 - Release naming and documentation are more suitable for public users
 - README now contains both a beginner quick-start section and a detailed feature/implementation reference
+- Release files can be verified using `SHA256SUMS.txt`
 
 ### Known limitations
 
