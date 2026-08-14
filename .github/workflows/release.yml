@@ -1,20 +1,18 @@
 name: Build Windows Release
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "app.py"
-      - "invoice_extract.py"
-      - "jd_qq.py"
-      - "purchase_tracker.py"
-      - "tests/**"
-      - "requirements.txt"
-      - "requirements-dev.txt"
-      - "tools/generate_icon.py"
-      - "assets/**"
-      - ".github/workflows/release.yml"
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Release tag, e.g. v5.2.0-beta.1 or v5.2.0"
+        required: true
+        default: "v5.2.0-beta.1"
+        type: string
+      prerelease:
+        description: "Publish as a pre-release"
+        required: true
+        default: true
+        type: boolean
 
 permissions:
   contents: write
@@ -85,16 +83,28 @@ jobs:
             dist/SHA256SUMS.txt
           if-no-files-found: error
 
-      - name: Create GitHub pre-release
+      - name: Create GitHub release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_PRERELEASE: ${{ inputs.prerelease }}
         run: |
-          $tag = "v5.2.$env:GITHUB_RUN_NUMBER"
-          gh release create $tag `
-            "dist/InvoiceManager-Windows-x64.exe" `
-            "dist/SHA256SUMS.txt" `
-            --target "$env:GITHUB_SHA" `
-            --title "InvoiceManager $tag" `
-            --prerelease `
-            --notes "InvoiceManager Windows x64 测试版。该版本在发布前已自动执行语法检查、import 检查和单元测试。下载 InvoiceManager-Windows-x64.exe，放入发票 PDF 文件夹后直接双击运行。Release 同时提供 SHA256SUMS.txt 用于校验下载文件。包含：PDF 发票解析、QQ 邮箱京东发票获取、购买记录、商品/快递费分开发票匹配、2 秒文件夹自动刷新、全字段搜索、表头排序、Ctrl/Shift 多选、人工确认/备注、批量删除发票、Excel 导出。"
+          if ($env:RELEASE_VERSION -notmatch '^v\d+\.\d+\.\d+([-.][0-9A-Za-z.-]+)?$') {
+            throw "Invalid version format: $env:RELEASE_VERSION"
+          }
+
+          $args = @(
+            "release", "create", $env:RELEASE_VERSION,
+            "dist/InvoiceManager-Windows-x64.exe",
+            "dist/SHA256SUMS.txt",
+            "--target", $env:GITHUB_SHA,
+            "--title", "InvoiceManager $env:RELEASE_VERSION",
+            "--notes", "InvoiceManager Windows x64 版本。该版本在发布前已自动执行语法检查、import 检查和单元测试。下载 InvoiceManager-Windows-x64.exe，放入发票 PDF 文件夹后直接双击运行。Release 同时提供 SHA256SUMS.txt 用于校验下载文件。"
+          )
+
+          if ($env:RELEASE_PRERELEASE -eq "true") {
+            $args += "--prerelease"
+          }
+
+          gh @args
