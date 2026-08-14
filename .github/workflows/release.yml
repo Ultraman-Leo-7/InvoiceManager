@@ -35,8 +35,8 @@ jobs:
       - name: Syntax and import check
         shell: pwsh
         run: |
-          python -m py_compile app.py invoice_extract.py jd_qq.py purchase_tracker.py tools/generate_icon.py
-          python -c "import app, invoice_extract, jd_qq, purchase_tracker; print('import check ok')"
+          python -m py_compile app.py invoice_extract.py jd_qq.py purchase_tracker.py data_backup.py self_update.py tools/generate_icon.py
+          python -c "import app, invoice_extract, jd_qq, purchase_tracker, data_backup, self_update; print('import check ok')"
 
       - name: Run unit tests
         shell: pwsh
