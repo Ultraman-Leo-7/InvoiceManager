@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+
+      - name: Syntax and import check
+        shell: pwsh
+        run: |
+          python -m py_compile app.py invoice_extract.py jd_qq.py purchase_tracker.py tools/generate_icon.py
+          python -c "import app, invoice_extract, jd_qq, purchase_tracker; print('import check ok')"
+
+      - name: Unit tests
+        shell: pwsh
+        run: |
+          python -m pytest -q
