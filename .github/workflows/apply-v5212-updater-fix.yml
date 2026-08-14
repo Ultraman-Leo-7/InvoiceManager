@@ -51,13 +51,6 @@ jobs:
           if '## v5.2.12' not in text:
               text = text.replace(marker, marker + section, 1)
           changelog.write_text(text, encoding='utf-8')
-
-          release = Path('.github/workflows/release.yml')
-          text = release.read_text(encoding='utf-8')
-          text = text.replace('description: "Release tag, e.g. v5.2.11"', 'description: "Release tag, e.g. v5.2.12"')
-          text = text.replace('default: "v5.2.11"', 'default: "v5.2.12"')
-          text = text.replace('InvoiceManager Windows x64 版本。v5.2.11 重构设置界面：左侧分类为‘通用、邮箱与发票、备份与恢复、更新与关于’；坚果云配置与恢复统一进入设置；主界面‘更多’仅保留设置、刷新发票文件夹和导出 Excel；更新页新增可点击 GitHub 项目地址与 Star 入口。下载 InvoiceManager-Windows-x64.exe，放入发票 PDF 文件夹后直接双击运行。Release 同时提供 SHA256SUMS.txt 用于校验下载文件。', 'InvoiceManager Windows x64 版本。v5.2.12 修复程序内更新后偶发的 PyInstaller onefile `_MEI` 临时目录 / `python312.dll` 启动错误，并保留 v5.2.11 的分类设置界面。下载 InvoiceManager-Windows-x64.exe，放入发票 PDF 文件夹后直接双击运行。Release 同时提供 SHA256SUMS.txt 用于校验下载文件。')
-          release.write_text(text, encoding='utf-8')
           PY
 
       - name: Commit changes
@@ -65,6 +58,6 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add app.py README.md CHANGELOG.md .github/workflows/release.yml
+          git add app.py README.md CHANGELOG.md
           git commit -m "Fix updater restart for v5.2.12"
           git push
