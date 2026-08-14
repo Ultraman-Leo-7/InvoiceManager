@@ -21,7 +21,7 @@ GitHub -> Actions -> Build Windows Release -> Run workflow
 
 The workflow asks for:
 
-- `version` — for example `v5.2.0-beta.1` or `v5.2.0`
+- `version` — for example `v5.2.9-beta.1` or `v5.2.9`
 - `prerelease` — enable for test/beta builds; disable for a normal stable release
 
 The version must follow the form:
@@ -33,8 +33,37 @@ vMAJOR.MINOR.PATCH
 An optional suffix is allowed, for example:
 
 ```text
-v5.2.0-beta.1
+v5.2.9-beta.1
 ```
+
+## Historical note about v5.2.1 ~ v5.2.8
+
+The early GitHub Actions workflow automatically generated tags like:
+
+```text
+v5.2.1
+v5.2.2
+...
+v5.2.8
+```
+
+At that time, the last number came directly from `GITHUB_RUN_NUMBER`. In other words, `v5.2.8` mainly meant "the eighth release-workflow run", not that the product had intentionally gone through eight carefully managed patch releases.
+
+Those tags are already public, so the project will **not go backwards** to `v5.2.0`. From now on version numbers remain monotonic.
+
+Therefore the next canonical test release should be:
+
+```text
+v5.2.9-beta.1
+```
+
+and, after testing, the corresponding stable release can be:
+
+```text
+v5.2.9
+```
+
+A later feature release can move to `v5.3.0` when appropriate.
 
 ## What the workflow does
 
@@ -80,17 +109,24 @@ For a public project, the current model is cleaner:
 
 ## Versioning guideline
 
-Until the project reaches a stable public baseline, pre-release suffixes are recommended:
+For test builds, use a suffix while keeping the numeric version higher than the latest published tag:
 
 ```text
-v5.2.0-beta.1
-v5.2.0-beta.2
+v5.2.9-beta.1
+v5.2.9-beta.2
 ```
 
-When a tested build is considered ready for ordinary users, publish without the pre-release flag, for example:
+When the tested build is ready for ordinary users, publish:
 
 ```text
-v5.2.0
+v5.2.9
 ```
 
-Avoid using the GitHub Actions run number as the long-term product version.
+For a larger feature update, increment the minor version, for example:
+
+```text
+v5.3.0-beta.1
+v5.3.0
+```
+
+Do not use the GitHub Actions run number as the long-term product version again.
