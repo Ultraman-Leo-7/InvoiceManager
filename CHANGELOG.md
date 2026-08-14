@@ -2,7 +2,22 @@
 
 All notable changes to InvoiceManager will be documented here.
 
-## v5.2.9 (in development)
+## v5.2.10 (in development)
+
+### Added
+
+- Manual purchase/invoice association overrides for correcting automatic price-match misalignment
+- Manual association can be cleared at any time to return a component to automatic price matching
+- Manual overrides are persisted in SQLite, included in normal backup/restore, and have an audit trail
+
+### Improved
+
+- Simplified the main command area: only the frequent JD-invoice fetch remains directly visible; refresh, Excel export, backup/restore, update check and settings are grouped under a compact “更多” menu
+- Invoice search scopes now follow the fields actually visible in the invoice table instead of exposing hidden fields
+- Manual associations are visibly marked in both invoice and purchase tables
+- Manual-association changes create a local safety snapshot before modifying state and trigger configured cloud backup afterward
+
+## v5.2.9
 
 > Historical note: early automated releases `v5.2.1` through `v5.2.8` used the GitHub Actions run number as the patch component. Starting with `v5.2.9`, versions are assigned deliberately and will remain monotonic.
 

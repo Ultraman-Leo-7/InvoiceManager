@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""InvoiceManager v5.2.9 GUI."""
+"""InvoiceManager v5.2.10 GUI."""
 
 from __future__ import annotations
 
@@ -40,17 +40,20 @@ from invoice_extract import (
 from jd_qq import fetch_jd_invoices
 from purchase_tracker import (
     add_purchase,
+    clear_manual_match,
     clear_purchases,
     delete_purchase,
     get_purchase,
     init_purchase_table,
     match_purchases,
+    required_components,
+    set_manual_match,
     update_purchase,
 )
 from self_update import download_verified_update, latest_release, schedule_windows_replacement
 
 APP_TITLE = "InvoiceManager"
-APP_VERSION = "5.2.9"
+APP_VERSION = "5.2.10"
 DB_FILENAME = ".invoice_manager.db"
 EXPORT_FILENAME = "发票汇总.xlsx"
 FOLDER_POLL_MS = 2000
@@ -381,7 +384,7 @@ def export_excel(fields: list[str]) -> int:
         values = [row[FIELD_DB_MAP[f]] for f in fields]
         info = match_map.get(str(row["digest"]))
         values.extend([
-            f"{info['purchase_name']}（{info['kind']}）" if info else "",
+            f"{info['purchase_name']}（{info['kind']}{'，手动' if info.get('manual') else ''}）" if info else "",
             "是" if row["confirmed"] else "否",
             row["note"],
         ])
@@ -439,7 +442,7 @@ class InvoiceApp(tk.Tk):
         self.status_var = tk.StringVar(value="就绪；自动监控发票文件夹已开启")
         self.count_var = tk.StringVar(value="0 张发票")
         self.search_var = tk.StringVar()
-        self.search_scope_var = tk.StringVar(value="全部字段")
+        self.search_scope_var = tk.StringVar(value="全部显示字段")
         self.only_unconfirmed_var = tk.BooleanVar(value=False)
         self.only_purchase_unmatched_var = tk.BooleanVar(value=False)
         self.editing_purchase_id = None
@@ -462,12 +465,18 @@ class InvoiceApp(tk.Tk):
 
         actions = ttk.Frame(self, padding=(12, 0, 12, 8))
         actions.pack(fill="x")
-        ttk.Button(actions, text="刷新发票文件夹", command=self.run_background_sync).pack(side="left", padx=(0, 6))
-        ttk.Button(actions, text="从QQ邮箱获取京东发票", command=self.open_jd_fetch_dialog).pack(side="left", padx=6)
-        ttk.Button(actions, text="导出 Excel", command=self.do_export).pack(side="left", padx=6)
-        ttk.Button(actions, text="数据备份", command=self.open_backup_dialog).pack(side="left", padx=6)
-        ttk.Button(actions, text="检查更新", command=self.check_for_updates).pack(side="left", padx=6)
-        ttk.Button(actions, text="设置", command=self.open_settings).pack(side="left", padx=6)
+        ttk.Button(actions, text="从QQ邮箱获取京东发票", command=self.open_jd_fetch_dialog).pack(side="left")
+
+        more_button = ttk.Menubutton(actions, text="更多")
+        more_menu = tk.Menu(more_button, tearoff=False)
+        more_menu.add_command(label="设置", command=self.open_settings)
+        more_menu.add_separator()
+        more_menu.add_command(label="刷新发票文件夹", command=self.run_background_sync)
+        more_menu.add_command(label="导出 Excel", command=self.do_export)
+        more_menu.add_command(label="数据备份与恢复", command=self.open_backup_dialog)
+        more_menu.add_command(label="检查更新", command=self.check_for_updates)
+        more_button["menu"] = more_menu
+        more_button.pack(side="left", padx=(8, 0))
 
         self.notebook = ttk.Notebook(self)
         self.notebook.pack(fill="both", expand=True, padx=12, pady=(0, 8))
@@ -513,19 +522,22 @@ class InvoiceApp(tk.Tk):
         for idx, item_id in enumerate(items):
             tree.move(item_id, "", idx)
 
+    def _visible_search_scopes(self):
+        return ["全部显示字段"] + selected_fields() + ["购买匹配", "人工确认", "备注"]
+
     def _build_invoice_tab(self):
         filters = ttk.Frame(self.invoice_tab, padding=(8, 8, 8, 6))
         filters.pack(fill="x")
         ttk.Label(filters, text="搜索：").pack(side="left")
-        scope = ttk.Combobox(
+        self.search_scope_box = ttk.Combobox(
             filters,
             textvariable=self.search_scope_var,
-            values=SEARCH_SCOPES,
+            values=self._visible_search_scopes(),
             state="readonly",
             width=15,
         )
-        scope.pack(side="left", padx=(4, 4))
-        scope.bind("<<ComboboxSelected>>", lambda _e: self.refresh_invoice_table())
+        self.search_scope_box.pack(side="left", padx=(4, 4))
+        self.search_scope_box.bind("<<ComboboxSelected>>", lambda _e: self.refresh_invoice_table())
         ttk.Entry(filters, textvariable=self.search_var, width=30).pack(side="left", padx=(0, 12))
         self.search_var.trace_add("write", lambda *_: self.refresh_invoice_table())
         ttk.Checkbutton(
@@ -570,7 +582,7 @@ class InvoiceApp(tk.Tk):
             return str(v)
 
         data = {field: s(row[db_key]) for field, db_key in FIELD_DB_MAP.items()}
-        data["购买匹配"] = f"{match_info['purchase_name']} {match_info['kind']}" if match_info else ""
+        data["购买匹配"] = (f"{match_info['purchase_name']} {match_info['kind']}" + (" 手动" if match_info.get("manual") else "")) if match_info else ""
         data["人工确认"] = "已确认 是 yes ✓" if row["confirmed"] else "未确认 否 no"
         data["备注"] = s(row["note"])
         return data
@@ -579,6 +591,10 @@ class InvoiceApp(tk.Tk):
         if not hasattr(self, "invoice_tree"):
             return
         fields = selected_fields()
+        scopes = self._visible_search_scopes()
+        self.search_scope_box["values"] = scopes
+        if self.search_scope_var.get() not in scopes:
+            self.search_scope_var.set("全部显示字段")
         columns = ["_digest"] + fields + ["购买匹配", "人工确认", "备注"]
         self.invoice_tree["columns"] = columns
         self.invoice_tree.column("_digest", width=0, stretch=False)
@@ -614,7 +630,11 @@ class InvoiceApp(tk.Tk):
                 continue
             if query:
                 values = self._searchable_values(row, info)
-                haystack = " ".join(values.values()) if scope == "全部字段" else values.get(scope, "")
+                if scope == "全部显示字段":
+                    visible = [name for name in scopes if name != "全部显示字段"]
+                    haystack = " ".join(values.get(name, "") for name in visible)
+                else:
+                    haystack = values.get(scope, "")
                 if query not in haystack.lower():
                     continue
             filtered.append((row, info))
@@ -627,7 +647,7 @@ class InvoiceApp(tk.Tk):
                     value = f"{value:.2f}"
                 values.append("" if value is None else value)
             values.extend([
-                f"✓ {info['purchase_name']}（{info['kind']}）" if info else "",
+                f"✓ {info['purchase_name']}（{info['kind']}{'，手动' if info.get('manual') else ''}）" if info else "",
                 "✓" if row["confirmed"] else "",
                 row["note"],
             ])
@@ -801,6 +821,7 @@ class InvoiceApp(tk.Tk):
         p_actions = ttk.Frame(self.purchase_tab, padding=(8, 0, 8, 6))
         p_actions.pack(fill="x")
         ttk.Button(p_actions, text="编辑选中项", command=self.load_selected_purchase_for_edit).pack(side="left")
+        ttk.Button(p_actions, text="调整发票关联", command=self.open_manual_match_dialog).pack(side="left", padx=(6, 0))
         ttk.Button(p_actions, text="删除选中项", command=self.delete_selected_purchase).pack(side="left", padx=(6, 0))
         ttk.Button(p_actions, text="一键清除全部", command=self.clear_all_purchases).pack(side="left", padx=(6, 0))
         self.purchase_summary_var = tk.StringVar(value="")
@@ -841,6 +862,192 @@ class InvoiceApp(tk.Tk):
         self.unused_invoice_tree.column("文件名", width=360)
         self.unused_invoice_tree.column("价税合计", width=100)
         self.unused_invoice_tree.grid(row=1, column=1, sticky="nsew", padx=(8, 0), pady=(4, 0))
+
+    def open_manual_match_dialog(self):
+        ids = self.selected_purchase_ids()
+        if len(ids) != 1:
+            messagebox.showinfo(APP_TITLE, "调整关联时请只选中一条购买记录。")
+            return
+        purchase_id = ids[0]
+        with connect_db() as conn:
+            purchase = get_purchase(conn, purchase_id)
+        if not purchase:
+            return
+
+        components = required_components(purchase)
+        component_by_kind = {x["kind"]: x for x in components}
+
+        win = tk.Toplevel(self)
+        win.title("调整发票关联")
+        win.transient(self)
+        win.grab_set()
+        win.geometry("860x560")
+        outer = ttk.Frame(win, padding=14)
+        outer.pack(fill="both", expand=True)
+
+        ttk.Label(
+            outer,
+            text=f"购买记录 #{purchase_id}：{purchase['name']}",
+            font=("TkDefaultFont", 10, "bold"),
+        ).pack(anchor="w")
+        ttk.Label(
+            outer,
+            text="手动关联优先于自动金额匹配；恢复自动匹配后，程序会重新按价格分配。",
+        ).pack(anchor="w", pady=(4, 10))
+
+        controls = ttk.Frame(outer)
+        controls.pack(fill="x", pady=(0, 8))
+        ttk.Label(controls, text="要调整：").pack(side="left")
+        kind_var = tk.StringVar(value=components[0]["kind"])
+        kind_box = ttk.Combobox(
+            controls,
+            textvariable=kind_var,
+            values=[x["kind"] for x in components],
+            state="readonly",
+            width=10,
+        )
+        kind_box.pack(side="left", padx=(4, 14))
+        ttk.Label(controls, text="搜索发票：").pack(side="left")
+        search_var = tk.StringVar()
+        ttk.Entry(controls, textvariable=search_var, width=32).pack(side="left", padx=(4, 0))
+
+        current_var = tk.StringVar()
+        ttk.Label(outer, textvariable=current_var).pack(anchor="w", pady=(0, 6))
+
+        frame = ttk.Frame(outer)
+        frame.pack(fill="both", expand=True)
+        columns = ("_digest", "文件名", "价税合计", "项目名称", "当前关联")
+        tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="browse")
+        tree.heading("_digest", text="")
+        tree.column("_digest", width=0, stretch=False)
+        for name, width in [("文件名", 320), ("价税合计", 100), ("项目名称", 220), ("当前关联", 240)]:
+            tree.heading(name, text=name)
+            tree.column(name, width=width, minwidth=80)
+        ybar = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=ybar.set)
+        tree.grid(row=0, column=0, sticky="nsew")
+        ybar.grid(row=0, column=1, sticky="ns")
+        frame.rowconfigure(0, weight=1)
+        frame.columnconfigure(0, weight=1)
+
+        def fresh_data():
+            with connect_db() as conn:
+                current_purchase = get_purchase(conn, purchase_id)
+                data = match_purchases(conn)
+                invoices = conn.execute(
+                    "SELECT digest, filename, total, project FROM invoices WHERE active=1 ORDER BY filename COLLATE NOCASE"
+                ).fetchall()
+            result = next(
+                (x for x in data["purchase_results"] if int(x["purchase"]["id"]) == purchase_id),
+                None,
+            )
+            return current_purchase, data, invoices, result
+
+        def refresh_dialog(*_args):
+            for item in tree.get_children():
+                tree.delete(item)
+            current_purchase, data, invoices, result = fresh_data()
+            if not current_purchase or not result:
+                current_var.set("购买记录已不存在。")
+                return
+            kind = kind_var.get()
+            component = next((x for x in result["components"] if x["kind"] == kind), None)
+            current_digest = None
+            if component and component.get("invoice") is not None:
+                current_digest = str(component["invoice"]["digest"])
+                mode = "手动关联" if component.get("manual") else "自动匹配"
+                current_var.set(f"当前：{mode} → {component['invoice']['filename']}")
+            elif component and component.get("manual_missing"):
+                current_var.set("当前：手动关联的发票已不在当前文件夹；恢复该 PDF 后会重新生效。")
+            else:
+                current_var.set("当前：未匹配")
+
+            query = search_var.get().strip().lower()
+            match_map = data["invoice_match_map"]
+            selected_item = None
+            for inv in invoices:
+                total = inv["total"]
+                total_text = f"{total:.2f}" if isinstance(total, (int, float)) else ""
+                project = str(inv["project"] or "")
+                haystack = f"{inv['filename']} {total_text} {project}".lower()
+                if query and query not in haystack:
+                    continue
+                digest = str(inv["digest"])
+                info = match_map.get(digest)
+                association = ""
+                if info:
+                    mode = "手动" if info.get("manual") else "自动"
+                    association = f"{info['purchase_name']}（{info['kind']}，{mode}）"
+                item_id = tree.insert(
+                    "",
+                    "end",
+                    values=(digest, inv["filename"], total_text, project, association),
+                )
+                if digest == current_digest:
+                    selected_item = item_id
+            if selected_item:
+                tree.selection_set(selected_item)
+                tree.see(selected_item)
+
+        def set_selected_manual():
+            selection = tree.selection()
+            if len(selection) != 1:
+                messagebox.showinfo(APP_TITLE, "请先选择一张发票。", parent=win)
+                return
+            values = tree.item(selection[0], "values")
+            digest = str(values[0])
+            filename = str(values[1])
+            kind = kind_var.get()
+            expected = component_by_kind[kind]["price"]
+            try:
+                actual = float(values[2])
+            except Exception:
+                actual = None
+            if actual is not None and int(round(actual * 100)) != int(round(expected * 100)):
+                if not messagebox.askyesno(
+                    APP_TITLE,
+                    f"金额不同，仍要手动关联吗？
+
+购买记录“{kind}”：¥{expected:.2f}
+"
+                    f"所选发票：¥{actual:.2f}
+{filename}",
+                    parent=win,
+                ):
+                    return
+            if not self._create_local_safety_backup_or_block("before-manual-invoice-match"):
+                return
+            try:
+                with connect_db() as conn:
+                    set_manual_match(conn, purchase_id, kind, digest)
+            except ValueError as e:
+                messagebox.showwarning(APP_TITLE, str(e), parent=win)
+                return
+            self.refresh_all()
+            self.schedule_auto_cloud_backup()
+            self.set_status(f"已手动关联：{purchase['name']}（{kind}） → {filename}")
+            refresh_dialog()
+
+        def restore_auto():
+            kind = kind_var.get()
+            if not self._create_local_safety_backup_or_block("before-clear-manual-invoice-match"):
+                return
+            with connect_db() as conn:
+                clear_manual_match(conn, purchase_id, kind)
+            self.refresh_all()
+            self.schedule_auto_cloud_backup()
+            self.set_status(f"已恢复自动匹配：{purchase['name']}（{kind}）")
+            refresh_dialog()
+
+        kind_box.bind("<<ComboboxSelected>>", refresh_dialog)
+        search_var.trace_add("write", refresh_dialog)
+
+        buttons = ttk.Frame(outer)
+        buttons.pack(fill="x", pady=(10, 0))
+        ttk.Button(buttons, text="设为手动关联", command=set_selected_manual).pack(side="left")
+        ttk.Button(buttons, text="恢复自动匹配", command=restore_auto).pack(side="left", padx=(8, 0))
+        ttk.Button(buttons, text="关闭", command=win.destroy).pack(side="right")
+        refresh_dialog()
 
     def _update_shipping_entry_state(self):
         if not hasattr(self, "shipping_entry"):
@@ -978,15 +1185,25 @@ class InvoiceApp(tk.Tk):
             comp = {x["kind"]: x for x in result["components"]}
             item_inv = comp.get("商品", {}).get("invoice")
             ship_inv = comp.get("快递费", {}).get("invoice")
+            item_text = item_inv["filename"] if item_inv else ""
+            ship_text = ship_inv["filename"] if ship_inv else ""
+            if item_inv and comp.get("商品", {}).get("manual"):
+                item_text = "手动：" + item_text
+            if ship_inv and comp.get("快递费", {}).get("manual"):
+                ship_text = "手动：" + ship_text
+            has_manual = any(x.get("manual") for x in result["components"])
+            status_text = "✓ 完整" if result["complete"] else "缺发票"
+            if has_manual:
+                status_text += " · 手动"
             self.purchase_tree.insert("", "end", values=(
                 p["id"],
                 p["name"],
                 f"{p['item_price']:.2f}",
                 "✓" if p["has_shipping"] else "",
                 f"{p['shipping_fee']:.2f}" if p["has_shipping"] else "",
-                item_inv["filename"] if item_inv else "",
-                ship_inv["filename"] if ship_inv else "",
-                "✓ 完整" if result["complete"] else "缺发票",
+                item_text,
+                ship_text,
+                status_text,
             ))
         for item in data["missing_components"]:
             self.missing_tree.insert(
