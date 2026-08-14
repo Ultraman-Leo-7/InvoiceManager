@@ -1,16 +1,32 @@
 @echo off
 chcp 65001 >nul
+setlocal
 
 python -m pip install -r requirements-dev.txt
+if errorlevel 1 goto :error
+
+python tools\generate_icon.py
+if errorlevel 1 goto :error
 
 pyinstaller ^
     --noconfirm ^
     --clean ^
+    --onefile ^
     --windowed ^
-    --name 发票管理工具 ^
-    --add-data "invoice_extract.py;." ^
-    --add-data "jd_qq.py;." ^
-    --add-data "purchase_tracker.py;." ^
+    --icon "assets\InvoiceManager.ico" ^
+    --name "InvoiceManager-Windows-x64" ^
     app.py
+if errorlevel 1 goto :error
 
+echo.
+echo Build complete:
+echo dist\InvoiceManager-Windows-x64.exe
+goto :end
+
+:error
+echo.
+echo Build failed. See the error messages above.
+exit /b 1
+
+:end
 pause
