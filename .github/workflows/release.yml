@@ -8,10 +8,6 @@ on:
         required: true
         default: "v5.2.11"
         type: string
-  push:
-    branches: [main]
-    paths:
-      - ".github/release-v5.2.11.trigger"
 
 permissions:
   contents: write
@@ -86,19 +82,15 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-          INPUT_VERSION: ${{ inputs.version }}
+          RELEASE_VERSION: ${{ inputs.version }}
         run: |
-          $version = $env:INPUT_VERSION
-          if ([string]::IsNullOrWhiteSpace($version)) {
-            $version = "v5.2.11"
-          }
-          if ($version -notmatch '^v\d+\.\d+\.\d+$') {
-            throw "Invalid version format: $version"
+          if ($env:RELEASE_VERSION -notmatch '^v\d+\.\d+\.\d+$') {
+            throw "Invalid version format: $env:RELEASE_VERSION"
           }
 
-          gh release create $version `
+          gh release create $env:RELEASE_VERSION `
             "dist/InvoiceManager-Windows-x64.exe" `
             "dist/SHA256SUMS.txt" `
             --target "$env:GITHUB_SHA" `
-            --title "InvoiceManager $version" `
-            --notes "InvoiceManager Windows x64 版本。v5.2.11 重构设置界面：左侧分类为‘通用、邮箱与发票、备份与恢复、更新与关于’；坚果云配置与恢复统一进入设置；主界面‘更多’仅保留设置、刷新发票文件夹和导出 Excel；更新页新增可点击 GitHub 项目地址与 Star 入口。下载 InvoiceManager-Windows-x64.exe，放入发票 PDF 文件夹后直接双击运行。Release 同时提供 SHA256SUMS.txt 用于校验下载文件。"
+            --title "InvoiceManager $env:RELEASE_VERSION" `
+            --notes "InvoiceManager Windows x64 版本。下载 InvoiceManager-Windows-x64.exe，放入发票 PDF 文件夹后直接双击运行。Release 同时提供 SHA256SUMS.txt 用于校验下载文件。"
