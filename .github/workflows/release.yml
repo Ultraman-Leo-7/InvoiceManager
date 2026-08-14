@@ -1,0 +1,68 @@
+name: Build Windows Release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "app.py"
+      - "invoice_extract.py"
+      - "jd_qq.py"
+      - "purchase_tracker.py"
+      - "requirements.txt"
+      - "requirements-dev.txt"
+      - ".github/workflows/release.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+
+      - name: Syntax and import check
+        shell: pwsh
+        run: |
+          python -m py_compile app.py invoice_extract.py jd_qq.py purchase_tracker.py
+          python -c "import app, invoice_extract, jd_qq, purchase_tracker; print('import check ok')"
+
+      - name: Build single-file Windows exe
+        shell: pwsh
+        run: |
+          pyinstaller --noconfirm --clean --onefile --windowed --name "发票管理工具" app.py
+          if (-not (Test-Path "dist/发票管理工具.exe")) { throw "exe build output not found" }
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: 发票管理工具-Windows
+          path: dist/发票管理工具.exe
+          if-no-files-found: error
+
+      - name: Create GitHub pre-release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "v5.1.$env:GITHUB_RUN_NUMBER"
+          gh release create $tag "dist/发票管理工具.exe" `
+            --target "$env:GITHUB_SHA" `
+            --title "发票管理工具 $tag" `
+            --prerelease `
+            --notes "Windows 测试版。单文件 exe，放入发票 PDF 文件夹后直接双击运行。包含：PDF 发票解析、QQ 邮箱京东发票获取、购买记录、价格匹配、人工确认/备注、Excel 导出。"
