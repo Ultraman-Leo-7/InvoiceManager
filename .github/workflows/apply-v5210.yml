@@ -1,0 +1,34 @@
+name: Apply v5.2.10 changes
+
+on:
+  push:
+    paths:
+      - ".github/workflows/apply-v5210.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Apply migration
+        run: python tools/apply_v5210.py
+
+      - name: Commit changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app.py purchase_tracker.py README.md CHANGELOG.md
+          git commit -m "Simplify UI and add manual invoice associations"
+          git push
