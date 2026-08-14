@@ -4,10 +4,14 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release tag, e.g. v5.2.12"
+        description: "Release tag, e.g. v5.2.13"
         required: true
-        default: "v5.2.12"
+        default: "v5.2.13"
         type: string
+  push:
+    branches: [main]
+    paths:
+      - ".github/release-v5.2.13.trigger"
 
 permissions:
   contents: write
@@ -82,7 +86,7 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_VERSION: ${{ inputs.version || 'v5.2.13' }}
         run: |
           if ($env:RELEASE_VERSION -notmatch '^v\d+\.\d+\.\d+$') {
             throw "Invalid version format: $env:RELEASE_VERSION"
@@ -93,4 +97,4 @@ jobs:
             "dist/SHA256SUMS.txt" `
             --target "$env:GITHUB_SHA" `
             --title "InvoiceManager $env:RELEASE_VERSION" `
-            --notes "InvoiceManager Windows x64 版本。v5.2.12 修复程序内更新后偶发的 PyInstaller onefile _MEI 临时目录 / python312.dll 启动错误。下载 InvoiceManager-Windows-x64.exe，放入发票 PDF 文件夹后直接双击运行。Release 同时提供 SHA256SUMS.txt 用于校验下载文件。"
+            --notes "InvoiceManager Windows x64 版本。v5.2.13 将设置分类‘更新与关于’更名为更自然的‘更新与反馈’。下载 InvoiceManager-Windows-x64.exe，放入发票 PDF 文件夹后直接双击运行。Release 同时提供 SHA256SUMS.txt 用于校验下载文件。"
