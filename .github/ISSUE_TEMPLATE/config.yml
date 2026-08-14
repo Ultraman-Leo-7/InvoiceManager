@@ -1,5 +1,11 @@
 blank_issues_enabled: false
 contact_links:
-  - name: Security / 隐私问题
+  - name: 使用说明 / Documentation
+    url: https://github.com/Ultraman-Leo-7/InvoiceManager#readme
+    about: 提交 Issue 前请先查看 README 中的快速使用、完整功能说明和当前限制。
+  - name: 隐私说明 / Privacy
+    url: https://github.com/Ultraman-Leo-7/InvoiceManager/blob/main/PRIVACY.md
+    about: 提交日志或截图前，请确认没有包含授权码、真实发票或其他敏感信息。
+  - name: Security / 安全问题
     url: https://github.com/Ultraman-Leo-7/InvoiceManager/security
     about: 涉及授权码、隐私泄露或安全漏洞时，请优先查看 Security 页面，不要在公开 Issue 中粘贴敏感信息。
