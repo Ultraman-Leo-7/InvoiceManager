@@ -1,0 +1,56 @@
+name: Rename settings section to 更新与反馈
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/rename-update-feedback.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply rename and version bump
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          for path in [Path('app.py'), Path('README.md'), Path('tests/test_v5211_smoke.py')]:
+              text = path.read_text(encoding='utf-8')
+              text = text.replace('更新与关于', '更新与反馈')
+              path.write_text(text, encoding='utf-8')
+
+          version = Path('version.py')
+          text = version.read_text(encoding='utf-8').replace('5.2.12', '5.2.13')
+          version.write_text(text, encoding='utf-8')
+
+          test = Path('tests/test_v5211_smoke.py')
+          text = test.read_text(encoding='utf-8').replace('5.2.12', '5.2.13')
+          test.write_text(text, encoding='utf-8')
+
+          changelog = Path('CHANGELOG.md')
+          text = changelog.read_text(encoding='utf-8')
+          marker = 'All notable changes to InvoiceManager will be documented here.\n\n'
+          section = '''## v5.2.13\n\n### Changed\n\n- Renamed the settings category from “更新与关于” to the more natural “更新与反馈”\n\n'''
+          if '## v5.2.13' not in text:
+              text = text.replace(marker, marker + section, 1)
+          changelog.write_text(text, encoding='utf-8')
+          PY
+
+      - name: Commit changes
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app.py README.md CHANGELOG.md version.py tests/test_v5211_smoke.py
+          git commit -m "Rename update settings section to feedback"
+          git push
