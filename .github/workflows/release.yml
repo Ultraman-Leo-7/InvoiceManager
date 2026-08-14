@@ -8,6 +8,10 @@ on:
         required: true
         default: "v5.2.12"
         type: string
+  push:
+    branches: [main]
+    paths:
+      - ".github/release-v5.2.12.trigger"
 
 permissions:
   contents: write
@@ -82,7 +86,7 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_VERSION: ${{ inputs.version || 'v5.2.12' }}
         run: |
           if ($env:RELEASE_VERSION -notmatch '^v\d+\.\d+\.\d+$') {
             throw "Invalid version format: $env:RELEASE_VERSION"
