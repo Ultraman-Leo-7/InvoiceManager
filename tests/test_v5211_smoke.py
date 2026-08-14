@@ -1,10 +1,11 @@
 import inspect
 
 import app
+import version
 
 
-def test_app_version_is_v5211():
-    assert app.APP_VERSION == "5.2.11"
+def test_app_version_comes_from_version_module():
+    assert app.APP_VERSION == version.APP_VERSION == "5.2.12"
 
 
 def test_visible_search_scope_label_is_present():
