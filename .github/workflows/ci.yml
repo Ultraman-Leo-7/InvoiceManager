@@ -1,6 +1,18 @@
 name: CI
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - "app.py"
+      - "invoice_extract.py"
+      - "jd_qq.py"
+      - "purchase_tracker.py"
+      - "tests/**"
+      - "requirements.txt"
+      - "requirements-dev.txt"
+      - "tools/**"
+      - ".github/workflows/ci.yml"
   pull_request:
     branches: [main]
   workflow_dispatch:
