@@ -1,3 +1,5 @@
+import inspect
+
 import app
 
 
@@ -10,9 +12,9 @@ def test_visible_search_scope_label_is_present():
 
 
 def test_settings_categories_are_present():
-    consts = app.InvoiceApp.open_settings.__code__.co_consts
+    source = inspect.getsource(app.InvoiceApp.open_settings)
     for label in ("通用", "邮箱与发票", "备份与恢复", "更新与关于"):
-        assert label in consts
+        assert label in source
 
 
 def test_project_url_points_to_public_repo():
