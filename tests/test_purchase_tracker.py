@@ -1,6 +1,13 @@
 import sqlite3
 
-from purchase_tracker import add_purchase, init_purchase_table, match_purchases
+from purchase_tracker import (
+    add_purchase,
+    delete_purchase,
+    init_purchase_table,
+    list_purchase_audit,
+    match_purchases,
+    update_purchase,
+)
 
 
 def make_db():
@@ -63,3 +70,19 @@ def test_unused_invoice_is_reported():
     result = match_purchases(conn)
 
     assert [row["filename"] for row in result["unused_invoices"]] == ["99元.pdf"]
+
+
+def test_purchase_audit_keeps_insert_update_and_delete_history():
+    conn = make_db()
+    purchase_id = add_purchase(conn, "键盘", "99.00", False, 0)
+    update_purchase(conn, purchase_id, "机械键盘", "109.00", True, "6.00")
+    delete_purchase(conn, purchase_id)
+
+    history = list_purchase_audit(conn, purchase_id)
+    actions = [row["action"] for row in history]
+
+    assert actions == ["INSERT", "UPDATE_BEFORE", "UPDATE_AFTER", "DELETE"]
+    assert history[0]["name"] == "键盘"
+    assert history[-1]["name"] == "机械键盘"
+    assert history[-1]["item_price"] == 109.0
+    assert history[-1]["shipping_fee"] == 6.0
