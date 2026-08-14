@@ -14,6 +14,7 @@ All notable changes to InvoiceManager will be documented here.
 - Optional mailbox start time down to the minute
 - Saved QQ Mail authorization code with Windows DPAPI protection
 - Purchase record management
+- Purchase-record total amount display (item prices + shipping fees)
 - Separate product-price and shipping-fee invoice matching
 - Price-based one-to-one purchase/invoice matching
 - Automatic invoice-folder change detection every 2 seconds
@@ -24,6 +25,18 @@ All notable changes to InvoiceManager will be documented here.
 - Manual invoice confirmation and notes
 - Batch deletion of PDF invoices from both disk and UI
 - SQLite persistence for parsed data and manual state
+- Local SQLite safety snapshots before editing/deleting/clearing existing purchase records
+- Destructive purchase operations are cancelled if the safety snapshot cannot be created
+- Nutstore WebDAV backup configuration using account email + third-party application password
+- Optional automatic cloud backup after meaningful data changes
+- Manual "backup now" action
+- Restore from latest Nutstore backup or a historical timestamped backup
+- SQLite integrity validation before cloud restore
+- Automatic local safety snapshot before cloud restore replaces the current database
+- Portable cloud snapshots strip QQ Mail and Nutstore application-password secrets
+- Manual in-app update check; no automatic startup update check
+- Verified update downloads using the release `SHA256SUMS.txt`
+- Windows self-replacement and relaunch after a verified update download
 - Excel export for invoices and purchase records
 - Windows x64 release builds with GitHub Actions
 - Stable release asset name: `InvoiceManager-Windows-x64.exe`
@@ -31,6 +44,8 @@ All notable changes to InvoiceManager will be documented here.
 - InvoiceManager application icon used by Windows builds
 - Unit tests for purchase matching and QQ/JD helper logic
 - Authorization-code protection round-trip test
+- Backup/snapshot/restore tests
+- Version parsing tests for the updater
 - Release build gate: syntax check, import check and pytest must pass before packaging
 - CI on both `main` pushes and Pull Requests
 - Explicit release workflow with a user-supplied version tag
@@ -40,9 +55,10 @@ All notable changes to InvoiceManager will be documented here.
 - Pull Request template with documentation/privacy/test checklists
 - `CONTRIBUTING.md`
 - `SECURITY.md`
-- `PRIVACY.md` describing local storage, network access and authorization-code handling
+- `PRIVACY.md` describing local storage, network access and secret handling
 - `SUPPORT.md`
 - `docs/TROUBLESHOOTING.md`
+- `docs/BACKUP.md`
 - `docs/RELEASE.md` documenting the repeatable release process
 - Privacy-safe `.gitignore`
 - MIT License
@@ -52,6 +68,9 @@ All notable changes to InvoiceManager will be documented here.
 - Excel is now an export format rather than the primary state store
 - Manual confirmation and notes survive PDF refreshes
 - Purchase matching results are visible from both invoice and purchase views
+- Purchase data has multiple recovery layers: SQLite transaction storage, local safety snapshots, and optional Nutstore history backups
+- Cloud backups are created from SQLite Backup API snapshots rather than directly copying a live database file
+- Cloud restore validates the downloaded SQLite database before replacing local data
 - Release naming and documentation are more suitable for public users
 - README contains both a beginner quick-start section and a detailed feature/implementation reference
 - Release files can be verified using `SHA256SUMS.txt`
@@ -64,6 +83,8 @@ All notable changes to InvoiceManager will be documented here.
 - QQ Mail integration currently scans only the INBOX folder
 - JD Mail parsing depends on the current sender/subject/HTML structure
 - Purchase matching currently uses price only; equal-price items may require manual review
+- Nutstore backup currently covers application data, not the invoice PDF files themselves
+- Cloud-restored device-bound application passwords must be entered again
 - Windows releases are not code-signed yet
 
 ## v5.2.1 ~ v5.2.8 (early automated releases)
