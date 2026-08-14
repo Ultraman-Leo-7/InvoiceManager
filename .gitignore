@@ -3,9 +3,13 @@
 *.xlsx
 .invoice_manager.db
 .invoice_manager.db-*
+.invoice_manager_backups/
 
 # Legacy/local runtime files
 .invoice_cache.json
+.invoice_manager_update.cmd
+InvoiceManager-Windows-x64.exe.update
+SHA256SUMS.txt.update
 
 # Python
 __pycache__/
