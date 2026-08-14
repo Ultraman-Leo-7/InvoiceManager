@@ -29,7 +29,8 @@ All notable changes to InvoiceManager will be documented here.
 - InvoiceManager application icon used by Windows builds
 - Unit tests for purchase matching and QQ/JD helper logic
 - Release build gate: syntax check, import check and pytest must pass before packaging
-- Pull Request CI workflow on Windows
+- CI on both `main` pushes and Pull Requests
+- Explicit release workflow with a user-supplied semantic version tag and pre-release switch
 - Dependabot for Python and GitHub Actions dependencies
 - Public Bug Issue template
 - Public Feature Request template
@@ -45,6 +46,7 @@ All notable changes to InvoiceManager will be documented here.
 - Release naming and documentation are more suitable for public users
 - README now contains both a beginner quick-start section and a detailed feature/implementation reference
 - Release files can be verified using `SHA256SUMS.txt`
+- Normal code pushes no longer create a new GitHub pre-release; CI and release publication are separated to avoid cluttering the Releases page
 
 ### Known limitations
 
