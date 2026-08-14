@@ -45,14 +45,16 @@ jobs:
       - name: Build single-file Windows exe
         shell: pwsh
         run: |
-          pyinstaller --noconfirm --clean --onefile --windowed --name "发票管理工具" app.py
-          if (-not (Test-Path "dist/发票管理工具.exe")) { throw "exe build output not found" }
+          pyinstaller --noconfirm --clean --onefile --windowed --name "InvoiceManager-Windows-x64" app.py
+          if (-not (Test-Path "dist/InvoiceManager-Windows-x64.exe")) {
+            throw "exe build output not found"
+          }
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: 发票管理工具-Windows
-          path: dist/发票管理工具.exe
+          name: InvoiceManager-Windows-x64
+          path: dist/InvoiceManager-Windows-x64.exe
           if-no-files-found: error
 
       - name: Create GitHub pre-release
@@ -60,9 +62,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $tag = "v5.1.$env:GITHUB_RUN_NUMBER"
-          gh release create $tag "dist/发票管理工具.exe" `
+          $tag = "v5.2.$env:GITHUB_RUN_NUMBER"
+          gh release create $tag "dist/InvoiceManager-Windows-x64.exe" `
             --target "$env:GITHUB_SHA" `
             --title "发票管理工具 $tag" `
             --prerelease `
-            --notes "Windows 测试版。单文件 exe，放入发票 PDF 文件夹后直接双击运行。包含：PDF 发票解析、QQ 邮箱京东发票获取、购买记录、价格匹配、人工确认/备注、Excel 导出。"
+            --notes "Windows x64 测试版。下载 InvoiceManager-Windows-x64.exe，放入发票 PDF 文件夹后直接双击运行。包含：PDF 发票解析、QQ 邮箱京东发票获取、购买记录、商品/快递费分开发票匹配、2 秒文件夹自动刷新、全字段搜索、表头排序、Ctrl/Shift 多选、人工确认/备注、批量删除发票、Excel 导出。"
