@@ -308,6 +308,8 @@ InvoiceManager/
 6. 替换旧 exe；
 7. 自动重新打开新版。
 
+从 v5.2.12 起，重启新版时会显式重置 PyInstaller 的临时运行环境，避免旧实例退出时清理 `_MEI` 临时目录导致新版启动时报 `Failed to load Python DLL`。
+
 更新只替换 exe，不会主动覆盖 `.invoice_manager.db`。
 
 ## 8. 搜索、排序和多选

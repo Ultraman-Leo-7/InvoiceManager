@@ -2,6 +2,17 @@
 
 All notable changes to InvoiceManager will be documented here.
 
+## v5.2.12
+
+### Fixed
+
+- Fixed the Windows in-app updater occasionally launching the replacement onefile executable with inherited PyInstaller `_PYI_*` state, which could cause `Failed to load Python DLL ... _MEI...\python312.dll` immediately after updating
+- The updater now waits for the current application process to exit, gives the onefile bootloader time to clean up, and launches the replacement with `PYINSTALLER_RESET_ENVIRONMENT=1` plus cleared inherited `_PYI_*` variables
+
+### Improved
+
+- Centralized the application version in `version.py` so future release version bumps no longer require editing the main GUI source
+
 ## v5.2.11
 
 ### Improved

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""InvoiceManager v5.2.11 GUI."""
+"""InvoiceManager GUI."""
 
 from __future__ import annotations
 
@@ -52,9 +52,9 @@ from purchase_tracker import (
     update_purchase,
 )
 from self_update import download_verified_update, latest_release, schedule_windows_replacement
+from version import APP_VERSION
 
 APP_TITLE = "InvoiceManager"
-APP_VERSION = "5.2.11"
 DB_FILENAME = ".invoice_manager.db"
 EXPORT_FILENAME = "发票汇总.xlsx"
 FOLDER_POLL_MS = 2000
