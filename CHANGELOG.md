@@ -34,8 +34,11 @@ All notable changes to InvoiceManager will be documented here.
 - Dependabot for Python and GitHub Actions dependencies
 - Public Bug Issue template
 - Public Feature Request template
+- Pull Request template with documentation/privacy/test checklists
 - `CONTRIBUTING.md`
 - `SECURITY.md`
+- `PRIVACY.md` describing local storage, network access and authorization-code handling
+- `docs/RELEASE.md` documenting the repeatable release process
 - Privacy-safe `.gitignore`
 
 ### Improved
