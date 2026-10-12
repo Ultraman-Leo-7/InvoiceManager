@@ -7,6 +7,7 @@ import email
 import hashlib
 import html
 import imaplib
+import io
 import os
 import re
 import tempfile
@@ -14,6 +15,8 @@ import time
 import unicodedata
 import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
+import zipfile
 from datetime import datetime
 from email.header import decode_header, make_header
 from email.policy import default
@@ -271,7 +274,41 @@ def _existing_pdf_hashes(output_dir: Path) -> set[str]:
     return result
 
 
+def _non_pdf_response_error(data: bytes, content_type: str) -> str:
+    """Empty reason means a recognized non-PDF file that can be ignored."""
+    if not data.strip():
+        return "返回内容为空，未取得 PDF"
+    # A landing/login/error page is not an invoice file, even with HTTP 200.
+    if "html" in content_type or re.search(
+        br"<(?:!doctype\s+html|html|head|body|script)\b", data[:4096], re.I,
+    ):
+        return "返回内容是网页，不是 PDF（可能是下载页面、登录页面或失效提示）"
+    try:
+        root = ET.fromstring(data)
+    except (ET.ParseError, ValueError):
+        root = None
+    if root is not None:
+        tags = {str(node.tag).rsplit("}", 1)[-1].casefold() for node in root.iter()}
+        if tags & {"html", "head", "body", "script"}:
+            return "返回内容是网页，不是 PDF"
+        if tags & {"error", "errors", "errorresponse", "fault"}:
+            # Keep only a short service error code; signed URLs may occur elsewhere.
+            code = next((node.text or "" for node in root.iter()
+                         if str(node.tag).rsplit("}", 1)[-1].casefold() in ("code", "faultcode")), "")
+            return "下载服务返回 XML 错误，未取得 PDF" + (f"（{_diagnostic_text(code, 80)}）" if code else "")
+        return ""
+    # ZIP also covers OFD/Office containers. Recognize bytes, not just MIME labels.
+    if zipfile.is_zipfile(io.BytesIO(data)):
+        return ""
+    if (data.startswith(b"\x89PNG\r\n\x1a\n")
+            or data.startswith(b"\xff\xd8\xff")
+            or data.startswith((b"GIF87a", b"GIF89a"))):
+        return ""
+    return "返回内容不是 PDF，也未识别为正常的其他文件格式"
+
+
 def _download_pdf(url: str, retries=3):
+    """Return (PDF bytes, '') or (None, error); (None, '') ignores another file."""
     if not url.lower().startswith(("http://", "https://")):
         return None, "链接不是 http/https 地址"
 
@@ -295,9 +332,12 @@ def _download_pdf(url: str, retries=3):
                 final_url = resp.geturl()
                 content_type = (resp.headers.get("Content-Type") or "").lower()
             if not data.startswith(b"%PDF-"):
+                error = _non_pdf_response_error(data, content_type)
+                if not error:
+                    return None, ""
                 host = urllib.parse.urlparse(final_url).netloc
                 return None, (
-                    "返回内容不是 PDF"
+                    error +
                     f"（Content-Type={content_type or '未知'}，最终域名={host or '未知'}）"
                 )
             return data, ""
@@ -466,7 +506,7 @@ def fetch_qq_invoices(
                     seen_uids.add(uid)
                     uids.append(uid)
 
-        seen_urls = set()
+        url_results = {}
         for i, uid in enumerate(uids, 1):
             if progress:
                 progress(f"扫描发票邮件 {i}/{len(uids)}...")
@@ -512,6 +552,9 @@ def fetch_qq_invoices(
             subject = decode_mime_header(str(msg.get("Subject", "")))
             order = extract_order_number(subject) or f"邮件{uid.decode(errors='ignore')}"
             link_index = 0
+            message_urls = set()
+            pdf_found = False
+            failures_before = result["failed"]
             for body in extract_html_bodies(msg):
                 parser = InvoiceLinkParser()
                 try:
@@ -520,22 +563,34 @@ def fetch_qq_invoices(
                     continue
                 for link in parser.links:
                     url = link.get("url") or ""
-                    if not url:
+                    if not url or url in message_urls:
                         continue
+                    message_urls.add(url)
                     link_index += 1
-                    if url in seen_urls:
+                    if url in url_results:
+                        has_pdf, error = url_results[url]
+                        pdf_found |= has_pdf
+                        if error:
+                            count(source, "failed")
+                            report_error(context, error)
                         continue
-                    seen_urls.add(url)
                     count(source, "links")
                     invoice_no = extract_invoice_number(link.get("context", ""))
                     stem = f"{order}_{invoice_no}" if invoice_no else f"{order}_发票{link_index}"
                     if progress:
                         progress(f"下载京东发票 {result['links']}...")
                     data, error = _download_pdf(url)
-                    save_candidate(source, stem, data, context, error)
+                    has_pdf = data is not None and data.startswith(b"%PDF-")
+                    url_results[url] = (has_pdf, error)
+                    pdf_found |= has_pdf
+                    if data is not None or error:
+                        save_candidate(source, stem, data, context, error)
             if not link_index:
                 count(source, "failed")
                 report_error(context, "京东邮件未找到发票 PDF 下载链接")
+            elif not pdf_found and result["failed"] == failures_before:
+                count(source, "failed")
+                report_error(context, "京东邮件未取得 PDF：下载入口只返回了非 PDF 文件，已忽略")
         return result
     finally:
         if mail is not None:
