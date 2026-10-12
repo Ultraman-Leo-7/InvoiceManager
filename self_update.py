@@ -8,8 +8,10 @@ import json
 import os
 import re
 import subprocess
+import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
 
 REPO = "Ultraman-Leo-7/InvoiceManager"
@@ -35,14 +37,78 @@ def _get_json(url: str, timeout: int = 20):
         return json.loads(resp.read().decode("utf-8"))
 
 
-def _download(url: str, destination: Path, timeout: int = 60) -> Path:
+def _positive_size(value) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, str) and value.strip().isascii() and value.strip().isdigit():
+        size = int(value)
+        return size if size > 0 else None
+    return None
+
+
+def _format_bytes(size: float) -> str:
+    if size < 1024:
+        return f"{size:.0f} B"
+    if size < 1024 * 1024:
+        return f"{size / 1024:.1f} KiB"
+    return f"{size / (1024 * 1024):.1f} MiB"
+
+
+def _download(
+    url: str,
+    destination: Path,
+    timeout: int = 60,
+    *,
+    progress: Callable[[str], None] | None = None,
+    total_size: int | None = None,
+) -> Path:
     req = urllib.request.Request(url, headers={"User-Agent": "InvoiceManager"})
     with urllib.request.urlopen(req, timeout=timeout) as resp, destination.open("wb") as f:
+        total = _positive_size(resp.headers.get("Content-Length")) or _positive_size(total_size)
+        downloaded = 0
+        sample_bytes = 0
+        sample_time = time.monotonic()
+        speed = 0.0
+
+        def report(finished: bool = False) -> None:
+            if progress is None:
+                return
+            if total is None:
+                amount = f"{_format_bytes(downloaded)}（总大小未知）"
+            else:
+                # 100% only describes the finished transfer, never SHA256 verification.
+                percent = min(100.0 if finished else 99.9, downloaded * 100 / total)
+                amount = f"{percent:.1f}% · {_format_bytes(downloaded)} / {_format_bytes(total)}"
+            state = "程序下载完成" if finished else "下载更新"
+            suffix = "（待校验）" if finished else ""
+            progress(f"{state}：{amount} · {_format_bytes(speed)}/s{suffix}")
+
+        report()
+        # read1 returns available network data instead of waiting to fill a large block.
+        read = getattr(resp, "read1", resp.read)
         while True:
-            chunk = resp.read(1024 * 1024)
+            chunk = read(64 * 1024)
+            now = time.monotonic()
             if not chunk:
+                if total is not None and downloaded < total:
+                    raise RuntimeError(
+                        f"程序下载不完整：已下载 {_format_bytes(downloaded)}，预期 {_format_bytes(total)}，请重试"
+                    )
+                if downloaded > sample_bytes and now > sample_time:
+                    speed = (downloaded - sample_bytes) / (now - sample_time)
+                report(finished=True)
                 break
             f.write(chunk)
+            downloaded += len(chunk)
+            if total is not None and downloaded > total:
+                # An inconsistent advertised size cannot provide a reliable percentage.
+                total = None
+            if now - sample_time >= 0.25:
+                speed = (downloaded - sample_bytes) / (now - sample_time)
+                report()
+                sample_bytes, sample_time = downloaded, now
     return destination
 
 
@@ -79,7 +145,11 @@ def _find_asset(release: dict, name: str) -> dict | None:
     return None
 
 
-def download_verified_update(release: dict, directory: Path) -> Path:
+def download_verified_update(
+    release: dict,
+    directory: Path,
+    progress: Callable[[str], None] | None = None,
+) -> Path:
     exe = _find_asset(release, EXE_ASSET)
     sums = _find_asset(release, CHECKSUM_ASSET)
     if not exe or not sums:
@@ -87,8 +157,14 @@ def download_verified_update(release: dict, directory: Path) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
     target = directory / (EXE_ASSET + ".update")
     sums_path = directory / (CHECKSUM_ASSET + ".update")
-    _download(exe["browser_download_url"], target)
+    if progress:
+        progress("正在连接下载服务器…")
+    _download(exe["browser_download_url"], target, progress=progress, total_size=exe.get("size"))
+    if progress:
+        progress("正在下载校验文件…")
     _download(sums["browser_download_url"], sums_path)
+    if progress:
+        progress("正在校验 SHA256…")
     checksum_text = sums_path.read_text(encoding="utf-8", errors="replace")
     expected = None
     for line in checksum_text.splitlines():
@@ -109,6 +185,8 @@ def download_verified_update(release: dict, directory: Path) -> Path:
         sums_path.unlink()
     except OSError:
         pass
+    if progress:
+        progress("SHA256 校验通过，准备安装…")
     return target
 
 

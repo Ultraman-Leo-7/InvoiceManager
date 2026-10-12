@@ -45,6 +45,7 @@ from invoice_extract import (
     sha256_file,
 )
 from jd_qq import fetch_qq_invoices
+from mail_fetch_report import format_mail_fetch_report
 from purchase_tracker import (
     add_purchase,
     clear_manual_match,
@@ -496,6 +497,8 @@ class InvoiceApp(tk.Tk):
         self.minsize(980, 640)
         init_db()
         self.status_var = tk.StringVar(value="就绪；自动监控发票文件夹已开启")
+        self.update_status_var = tk.StringVar(value="尚未检查更新")
+        self._update_busy = False
         self.count_var = tk.StringVar(value="0 张发票")
         self.search_var = tk.StringVar()
         self.search_scope_var = tk.StringVar(value="全部显示字段")
@@ -551,6 +554,13 @@ class InvoiceApp(tk.Tk):
 
     def set_status(self, text):
         self.after(0, lambda: self.status_var.set(text))
+
+    def set_update_status(self, text):
+        def show():
+            self.update_status_var.set(text)
+            self.status_var.set(text)
+
+        self.after(0, show)
 
     def _poll_folder(self):
         try:
@@ -1619,6 +1629,9 @@ class InvoiceApp(tk.Tk):
             wraplength=640,
         ).pack(anchor="w", pady=(6, 10))
         ttk.Button(update_box, text="检查更新", command=self.check_for_updates).pack(anchor="w")
+        ttk.Label(
+            update_box, textvariable=self.update_status_var, wraplength=620,
+        ).pack(anchor="w", fill="x", pady=(10, 0))
 
         about_box = ttk.LabelFrame(update, text="项目与反馈", padding=12)
         about_box.pack(fill="x", pady=(14, 0))
@@ -1923,27 +1936,11 @@ class InvoiceApp(tk.Tk):
                 if result["failed"] == 0:
                     set_setting("qq_invoice_last_fetch", started.isoformat(timespec="seconds"))
                 self.after(0, self.refresh_all)
-                msg = (
-                    f"发票邮件 {result['emails']} 封，发现 {result.get('attachments', 0)} 个 PDF 附件、{result['links']} 个下载链接。\n"
-                    f"新下载 {result['downloaded']}，已存在 {result['skipped']}，失败 {result['failed']}。\n"
-                    f"待处理重复 {sum(len(group['remove']) for group in stats['duplicates'])} 个。\n"
-                    f"当前文件夹共 {stats['total']} 个 PDF。"
-                )
+                msg = format_mail_fetch_report(result, stats)
                 self.set_status(f"邮箱获取完成：新下载 {result['downloaded']}，失败 {result['failed']}")
-                if result["failed"]:
-                    detail = "\n".join(result["errors"][:5])
-                    detail += "\n……" if len(result["errors"]) > 5 else ""
-                    msg += (
-                        "\n\n存在失败项，因此“上次成功获取时间”没有推进，下次可以安全重试。\n\n"
-                        + detail
-                    )
 
                 def finish_fetch():
-                    if result["failed"]:
-                        messagebox.showwarning(APP_TITLE, msg)
-                    else:
-                        messagebox.showinfo(APP_TITLE, msg)
-                    self.queue_duplicate_prompt(stats["duplicates"])
+                    self.show_mail_fetch_result(msg, bool(result["failed"]), stats["duplicates"])
 
                 self.after(0, finish_fetch)
             except Exception as e:
@@ -1956,6 +1953,41 @@ class InvoiceApp(tk.Tk):
                 )
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def show_mail_fetch_result(self, message, has_failures, duplicates):
+        win = tk.Toplevel(self)
+        win.title("邮箱获取结果")
+        win.transient(self)
+        win.geometry("860x580")
+        win.minsize(680, 420)
+        outer = ttk.Frame(win, padding=14)
+        outer.pack(fill="both", expand=True)
+        heading = "获取完成，部分项目需要处理" if has_failures else "获取完成"
+        ttk.Label(outer, text=heading, font=("Microsoft YaHei UI", 12, "bold")).pack(anchor="w", pady=(0, 10))
+        body = ttk.Frame(outer)
+        body.pack(fill="both", expand=True)
+        details = tk.Text(body, wrap="word", font=("Microsoft YaHei UI", 10), padx=10, pady=10)
+        scrollbar = ttk.Scrollbar(body, orient="vertical", command=details.yview)
+        details.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        details.pack(side="left", fill="both", expand=True)
+        details.insert("1.0", message)
+        details.configure(state="disabled")
+        closed = False
+
+        def close():
+            nonlocal closed
+            if closed:
+                return
+            closed = True
+            win.destroy()
+            self.queue_duplicate_prompt(duplicates)
+
+        ttk.Button(outer, text="确定", command=close).pack(anchor="e", pady=(12, 0))
+        win.protocol("WM_DELETE_WINDOW", close)
+        win.bind("<Escape>", lambda _event: close())
+        win.grab_set()
+        details.focus_set()
 
     def _nutstore_credentials(self) -> tuple[str, str]:
         email = get_setting("nutstore_email", "").strip()
@@ -2223,7 +2255,10 @@ class InvoiceApp(tk.Tk):
         ttk.Button(row2, text="关闭", command=win.destroy).pack(side="right")
 
     def check_for_updates(self):
-        self.set_status("正在检查更新...")
+        if self._update_busy:
+            return
+        self._update_busy = True
+        self.set_update_status("正在检查更新...")
 
         def worker():
             try:
@@ -2233,64 +2268,85 @@ class InvoiceApp(tk.Tk):
                         f"当前版本：v{APP_VERSION}\n"
                         + (f"最新正式版：v{info.get('latest')}\n\n当前已经是最新版。" if info.get("latest") else "暂无可用的正式 Release。")
                     )
-                    self.set_status("检查更新完成")
-                    self.after(0, lambda: messagebox.showinfo("检查更新", text))
+                    self.set_update_status("检查更新完成")
+
+                    def show_current():
+                        self._update_busy = False
+                        messagebox.showinfo("检查更新", text)
+
+                    self.after(0, show_current)
                     return
                 latest = info["latest"]
                 release = info["release"]
-                self.set_status(f"发现新版本 v{latest}")
+                self.set_update_status(f"发现新版本 v{latest}")
 
                 def ask():
-                    if messagebox.askyesno(
-                        "发现新版本",
-                        f"当前版本：v{APP_VERSION}\n最新版本：v{latest}\n\n是否现在下载并更新？",
-                    ):
+                    try:
+                        accepted = messagebox.askyesno(
+                            "发现新版本",
+                            f"当前版本：v{APP_VERSION}\n最新版本：v{latest}\n\n是否现在下载并更新？",
+                        )
+                    finally:
+                        self._update_busy = False
+                    if accepted:
                         self.download_and_install_update(release, latest)
 
                 self.after(0, ask)
             except Exception as e:
-                self.set_status("检查更新失败")
+                self.set_update_status("检查更新失败")
                 error_message = (
                     f"检查更新失败：{type(e).__name__}: {e}\n\n"
                     "尚未下载或替换程序，本地数据未因本次检查而更改。\n"
                     "可稍后重试，或从项目主页的 Releases 手动下载新版。"
                 )
-                self.after(0, lambda msg=error_message: messagebox.showerror("检查更新", msg))
+                def show_failure(msg=error_message):
+                    self._update_busy = False
+                    messagebox.showerror("检查更新", msg)
+
+                self.after(0, show_failure)
 
         threading.Thread(target=worker, daemon=True).start()
 
     def download_and_install_update(self, release: dict, latest: str):
+        if self._update_busy:
+            return
         if not getattr(sys, "frozen", False):
             messagebox.showinfo(
                 "更新",
                 "当前正在以 Python 源码方式运行。自动替换只用于打包后的 Windows exe。",
             )
             return
-        self.set_status(f"正在下载 v{latest}...")
+        self._update_busy = True
+        self.set_update_status(f"正在连接下载服务器，准备下载 v{latest}...")
 
         def worker():
             try:
-                downloaded = download_verified_update(release, BASE_DIR)
-                self.set_status("更新已下载并通过 SHA256 校验，正在重启...")
+                downloaded = download_verified_update(release, BASE_DIR, progress=self.set_update_status)
+                self.set_update_status("更新已下载并通过 SHA256 校验，正在重启...")
 
                 def install():
                     try:
                         schedule_windows_replacement(Path(sys.executable), downloaded)
                     except Exception as e:
-                        self.set_status("安装更新失败")
+                        self._update_busy = False
+                        self.set_update_status("安装更新失败")
                         messagebox.showerror("更新失败", f"无法启动更新程序：{type(e).__name__}: {e}")
                         return
                     self.destroy()
 
                 self.after(0, install)
             except Exception as e:
-                self.set_status("下载更新失败")
+                self.set_update_status("下载更新失败")
                 error_message = (
                     f"下载更新失败：{type(e).__name__}: {e}\n\n"
                     "旧程序尚未替换，本地数据库和 PDF 保留。\n"
                     "也可手动下载新版：退出程序后，仅替换原文件夹内的 exe，保留其他文件。"
                 )
-                self.after(0, lambda msg=error_message: messagebox.showerror("更新失败", msg))
+                def show_failure(msg=error_message):
+                    self._update_busy = False
+                    messagebox.showerror("更新失败", msg)
+
+                self.after(0, show_failure)
 
         threading.Thread(target=worker, daemon=True).start()
 
