@@ -5,10 +5,12 @@ on:
     branches: [main]
     paths:
       - "app.py"
+      - "version.py"
       - "invoice_extract.py"
       - "jd_qq.py"
       - "purchase_tracker.py"
       - "data_backup.py"
+      - "duplicate_files.py"
       - "self_update.py"
       - "tests/**"
       - "requirements.txt"
@@ -16,6 +18,7 @@ on:
       - "tools/**"
       - "assets/**"
       - ".github/workflows/ci.yml"
+      - ".github/workflows/release.yml"
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -46,7 +49,7 @@ jobs:
       - name: Syntax and import check
         shell: pwsh
         run: |
-          python -m py_compile app.py invoice_extract.py jd_qq.py purchase_tracker.py data_backup.py self_update.py tools/generate_icon.py
+          python -m py_compile app.py invoice_extract.py jd_qq.py purchase_tracker.py data_backup.py duplicate_files.py self_update.py tools/generate_icon.py
           python -c "import app, invoice_extract, jd_qq, purchase_tracker, data_backup, self_update; print('import check ok')"
 
       - name: Unit tests

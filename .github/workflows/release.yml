@@ -1,19 +1,28 @@
 name: Build Windows Release
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - "version.py"
   workflow_dispatch:
     inputs:
       version:
-        description: "Release tag, e.g. v5.2.13"
-        required: true
-        default: "v5.2.13"
+        description: "Optional release tag; must match version.py (leave blank to use it)"
+        required: false
+        default: ""
         type: string
+
+concurrency:
+  group: windows-release-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: write
 
 jobs:
   build-and-release:
+    if: github.ref == 'refs/heads/main'
     runs-on: windows-latest
 
     steps:
@@ -32,11 +41,44 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements-dev.txt
 
+      - name: Validate version and prepare release notes
+        id: release
+        shell: python
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          import os
+          import re
+          import runpy
+          from pathlib import Path
+
+          tag = "v" + runpy.run_path("version.py")["APP_VERSION"]
+          if not re.fullmatch(r"v\d+\.\d+\.\d+", tag):
+              raise SystemExit(f"Invalid application version: {tag}")
+          requested = os.environ.get("REQUESTED_VERSION", "").strip()
+          if requested and requested != tag:
+              raise SystemExit(f"Requested {requested}, but version.py contains {tag}")
+          changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
+          heading = f"## {tag}\n"
+          if heading not in changelog:
+              raise SystemExit(f"CHANGELOG.md is missing {tag}")
+          notes = changelog.split(heading, 1)[1].split("\n## ", 1)[0].strip()
+          if not notes:
+              raise SystemExit(f"CHANGELOG.md has no release notes for {tag}")
+          Path("release-notes.md").write_text(
+              "InvoiceManager Windows x64 版本。下载 InvoiceManager-Windows-x64.exe 后直接运行；"
+              "已有用户可在“设置 → 更新与反馈 → 检查更新”中升级。"
+              "SHA256SUMS.txt 用于校验下载文件。\n\n" + notes + "\n",
+              encoding="utf-8",
+          )
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"tag={tag}\n")
+
       - name: Syntax and import check
         shell: pwsh
         run: |
-          python -m py_compile app.py version.py invoice_extract.py jd_qq.py purchase_tracker.py data_backup.py self_update.py tools/generate_icon.py
-          python -c "import app, version, invoice_extract, jd_qq, purchase_tracker, data_backup, self_update; print('import check ok')"
+          python -m py_compile app.py version.py invoice_extract.py jd_qq.py purchase_tracker.py data_backup.py duplicate_files.py self_update.py tools/generate_icon.py
+          python -c "import app, version, invoice_extract, jd_qq, purchase_tracker, data_backup, duplicate_files, self_update; print('import check ok')"
 
       - name: Run unit tests
         shell: pwsh
@@ -82,7 +124,7 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_VERSION: ${{ steps.release.outputs.tag }}
         run: |
           if ($env:RELEASE_VERSION -notmatch '^v\d+\.\d+\.\d+$') {
             throw "Invalid version format: $env:RELEASE_VERSION"
@@ -93,4 +135,4 @@ jobs:
             "dist/SHA256SUMS.txt" `
             --target "$env:GITHUB_SHA" `
             --title "InvoiceManager $env:RELEASE_VERSION" `
-            --notes "InvoiceManager Windows x64 版本。下载 InvoiceManager-Windows-x64.exe，放入发票 PDF 文件夹后直接双击运行。Release 同时提供 SHA256SUMS.txt 用于校验下载文件。"
+            --notes-file "release-notes.md"

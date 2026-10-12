@@ -31,6 +31,12 @@ from data_backup import (
     restore_snapshot,
     temporary_snapshot_path,
 )
+from duplicate_files import (
+    build_duplicate_groups,
+    cleanup_duplicate_files,
+    pending_duplicate_groups,
+    rename_duplicate_files,
+)
 from invoice_extract import (
     AVAILABLE_FIELDS,
     DEFAULT_FIELDS,
@@ -60,6 +66,7 @@ EXPORT_FILENAME = "发票汇总.xlsx"
 FOLDER_POLL_MS = 2000
 LOCAL_BACKUP_DIRNAME = ".invoice_manager_backups"
 PROJECT_URL = "https://github.com/Ultraman-Leo-7/InvoiceManager"
+SYNC_LOCK = threading.Lock()
 
 
 def app_dir() -> Path:
@@ -261,10 +268,30 @@ def invoice_record_to_db(record: dict) -> dict:
 
 
 def sync_folder(progress=None) -> dict:
+    with SYNC_LOCK:
+        return _sync_folder(progress)
+
+
+def _sync_folder(progress=None) -> dict:
     pdfs = sorted(BASE_DIR.glob("*.pdf"), key=lambda p: p.name.lower())
     now = datetime.now().isoformat(timespec="seconds")
     stats = {"total": len(pdfs), "reused": 0, "parsed": 0, "failed": 0, "removed": 0}
+    files_by_hash = {}
+    arrival_times = {}
+
+    def remember_pdf(pdf, digest):
+        if pdf.is_symlink() or not pdf.is_file():
+            return
+        info = pdf.stat()
+        if info.st_size > 0:
+            files_by_hash.setdefault(digest, []).append(pdf.name)
+            arrival_times[pdf.name] = getattr(info, "st_birthtime", info.st_ctime)
+
     with connect_db() as conn:
+        preferred_names = {
+            row["digest"]: row["filename"]
+            for row in conn.execute("SELECT digest, filename FROM invoices")
+        }
         old_active = {row["digest"] for row in conn.execute("SELECT digest FROM invoices WHERE active=1")}
         conn.execute("UPDATE invoices SET active=0")
         for i, pdf in enumerate(pdfs, 1):
@@ -279,6 +306,7 @@ def sync_folder(progress=None) -> dict:
                         (pdf.name, now, digest),
                     )
                     stats["reused"] += 1
+                    remember_pdf(pdf, digest)
                     continue
                 record = parse_invoice(pdf)
                 data = invoice_record_to_db(record)
@@ -328,13 +356,39 @@ def sync_folder(progress=None) -> dict:
                     **data,
                 })
                 stats["parsed"] += 1
+                remember_pdf(pdf, digest)
             except Exception as e:
                 stats["failed"] += 1
                 if progress:
                     progress(f"解析失败：{pdf.name} | {type(e).__name__}: {e}")
+        all_groups = build_duplicate_groups(files_by_hash, preferred_names, arrival_times=arrival_times)
+        for group in all_groups:
+            conn.execute(
+                "UPDATE invoices SET filename=? WHERE digest=?",
+                (group["keep"], group["digest"]),
+            )
+        stats["duplicates"] = pending_duplicate_groups(all_groups)
         current_active = {row["digest"] for row in conn.execute("SELECT digest FROM invoices WHERE active=1")}
         stats["removed"] = len(old_active - current_active)
+        stats["unique"] = len(current_active)
     return stats
+
+
+def handle_duplicate_files(groups: list[dict], *, delete: bool) -> dict:
+    """Apply the user's explicit choice, then reconcile records with actual files."""
+    with SYNC_LOCK:
+        if delete:
+            result = cleanup_duplicate_files(BASE_DIR, groups)
+            result["renamed"] = []
+        else:
+            result = rename_duplicate_files(BASE_DIR, groups)
+            result["deleted"] = []
+        try:
+            result["stats"] = _sync_folder()
+        except Exception as error:
+            result["stats"] = None
+            result["errors"].append(f"文件处理后刷新失败，请重新刷新：{error}")
+    return result
 
 
 def all_active_rows():
@@ -449,6 +503,10 @@ class InvoiceApp(tk.Tk):
         self.only_purchase_unmatched_var = tk.BooleanVar(value=False)
         self.editing_purchase_id = None
         self._sync_running = False
+        self._duplicate_dialog_open = False
+        self._duplicate_prompt_scheduled = False
+        self._pending_duplicate_prompt = ([], False)
+        self._handled_duplicate_files = set()
         self._cloud_backup_running = False
         self._cloud_backup_pending = False
         self._last_folder_signature = folder_signature()
@@ -497,7 +555,7 @@ class InvoiceApp(tk.Tk):
     def _poll_folder(self):
         try:
             sig = folder_signature()
-            if sig != self._last_folder_signature and not self._sync_running:
+            if sig != self._last_folder_signature and not self._sync_running and not self._duplicate_dialog_open:
                 self._last_folder_signature = sig
                 self.run_background_sync(silent=True, source="检测到文件夹变化")
         finally:
@@ -1223,6 +1281,115 @@ class InvoiceApp(tk.Tk):
         self.refresh_invoice_table()
         self.refresh_purchase_tab()
 
+    def queue_duplicate_prompt(self, groups, force=False):
+        groups = pending_duplicate_groups(groups)
+        if not force:
+            groups = [
+                {**group, "remove": [
+                    name for name in group["remove"]
+                    if (group["digest"], name) not in self._handled_duplicate_files
+                ]}
+                for group in groups
+            ]
+            groups = [group for group in groups if group["remove"]]
+        self._pending_duplicate_prompt = (groups, force)
+        if self._duplicate_prompt_scheduled or self._duplicate_dialog_open or not groups:
+            return
+        self._duplicate_prompt_scheduled = True
+        self.after(200, self._show_pending_duplicate_prompt)
+
+    def _show_pending_duplicate_prompt(self):
+        self._duplicate_prompt_scheduled = False
+        groups, force = self._pending_duplicate_prompt
+        if not groups or self._duplicate_dialog_open:
+            return
+        if self._sync_running or self.tk.call("grab", "current", self._w):
+            self._duplicate_prompt_scheduled = True
+            self.after(500, self._show_pending_duplicate_prompt)
+            return
+        self._pending_duplicate_prompt = ([], False)
+        self._duplicate_dialog_open = True
+        prompt_keys = {(group["digest"], name) for group in groups for name in group["remove"]}
+        count = sum(len(group["remove"]) for group in groups)
+        win = tk.Toplevel(self)
+        win.title("是否删除重复发票文件？")
+        win.transient(self)
+        win.geometry("820x520")
+        win.minsize(640, 400)
+        win.grab_set()
+        outer = ttk.Frame(win, padding=14)
+        outer.pack(fill="both", expand=True)
+        ttk.Label(outer, text=f"发现 {len(groups)} 组内容相同的 PDF，共 {count} 个重复副本。").pack(anchor="w")
+        ttk.Label(
+            outer,
+            text="保留原文件。确认后删除下面列出的副本；不删除或关闭窗口，则给副本加“哈希副本-”前缀。",
+            wraplength=760,
+        ).pack(anchor="w", pady=(8, 10))
+        frame = ttk.Frame(outer)
+        frame.pack(fill="both", expand=True)
+        details = tk.Text(frame, wrap="word", height=16, font=("Microsoft YaHei UI", 10))
+        scrollbar = ttk.Scrollbar(frame, orient="vertical", command=details.yview)
+        details.configure(yscrollcommand=scrollbar.set)
+        details.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        for index, group in enumerate(groups, 1):
+            details.insert("end", f"第 {index} 组\n保留：{group['keep']}\n")
+            for name in group["remove"]:
+                details.insert("end", f"副本：{name}\n")
+            details.insert("end", f"SHA-256：{group['digest']}\n\n")
+        details.configure(state="disabled")
+        status = tk.StringVar(value="删除为永久删除；选择不删除时，文件内容保留，重名会自动编号。")
+        ttk.Label(outer, textvariable=status, wraplength=760).pack(anchor="w", pady=(10, 8))
+        buttons = ttk.Frame(outer)
+        buttons.pack(fill="x")
+        busy = False
+
+        def finish(result):
+            self._sync_running = False
+            self._duplicate_dialog_open = False
+            self._handled_duplicate_files.update(prompt_keys)
+            win.destroy()
+            self._last_folder_signature = folder_signature() if result["stats"] is not None else None
+            self.refresh_all()
+            self.status_var.set(
+                f"重复文件处理完成：删除 {len(result['deleted'])} 个，标记副本 {len(result['renamed'])} 个，"
+                f"失败 {len(result['errors'])} 项"
+            )
+            if result["errors"]:
+                detail = "\n".join(result["errors"][:8])
+                if len(result["errors"]) > 8:
+                    detail += "\n……"
+                messagebox.showwarning(APP_TITLE, "部分文件未处理，请刷新后重试：\n\n" + detail)
+            if result["stats"] is not None:
+                self.queue_duplicate_prompt(result["stats"]["duplicates"])
+
+        def apply_choice(delete):
+            nonlocal busy
+            if busy:
+                return
+            busy = True
+            self._sync_running = True
+            delete_button.configure(state="disabled")
+            keep_button.configure(state="disabled")
+            status.set("正在核对并删除副本……" if delete else "正在核对并给副本添加前缀……")
+
+            def worker():
+                try:
+                    result = handle_duplicate_files(groups, delete=delete)
+                except Exception as error:
+                    result = {"deleted": [], "renamed": [], "errors": [str(error)], "stats": None}
+                self.after(0, lambda: finish(result))
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        delete_button = ttk.Button(buttons, text=f"确认删除 {count} 个副本", command=lambda: apply_choice(True))
+        delete_button.pack(side="right")
+        keep_button = ttk.Button(buttons, text="不删除，添加前缀", command=lambda: apply_choice(False))
+        keep_button.pack(side="right", padx=(0, 8))
+        keep_button.focus_set()
+        win.protocol("WM_DELETE_WINDOW", lambda: apply_choice(False))
+        win.bind("<Escape>", lambda event: apply_choice(False))
+
     def run_background_sync(self, silent=False, source="手动刷新"):
         if self._sync_running:
             return
@@ -1233,32 +1400,31 @@ class InvoiceApp(tk.Tk):
                 self.set_status(f"{source}：正在扫描发票文件夹...")
                 stats = sync_folder(progress=self.set_status)
                 self._last_folder_signature = folder_signature()
-                self.after(0, self.refresh_all)
                 msg = (
-                    f"刷新完成：{stats['total']} 张；复用 {stats['reused']}，重新解析 {stats['parsed']}，"
-                    f"移除 {stats['removed']}，异常 {stats['failed']}"
+                    f"刷新完成：{stats['total']} 个 PDF，{stats['unique']} 张发票；复用 {stats['reused']}，重新解析 {stats['parsed']}，"
+                    f"待处理重复 {sum(len(group['remove']) for group in stats['duplicates'])} 个，"
+                    f"移除 {stats['removed']}，解析异常 {stats['failed']}"
                 )
-                self.set_status(msg)
-                if not silent and stats["failed"]:
-                    self.after(
-                        0,
-                        lambda: messagebox.showwarning(
-                            APP_TITLE,
-                            msg + "\n\n有解析异常，可显示“提取状态”字段查看。",
-                        ),
-                    )
+
+                def finish():
+                    self._sync_running = False
+                    self.refresh_all()
+                    self.status_var.set(msg)
+                    if not silent and stats["failed"]:
+                        messagebox.showwarning(APP_TITLE, msg + "\n\n有解析异常，可显示“提取状态”字段查看。")
+                    self.queue_duplicate_prompt(stats["duplicates"], force=not silent)
+
+                self.after(0, finish)
             except Exception as e:
                 detail = traceback.format_exc()
+                error_text = f"刷新失败：{type(e).__name__}: {e}\n\n" + detail[-1800:]
                 self.set_status("刷新失败")
-                self.after(
-                    0,
-                    lambda: messagebox.showerror(
-                        APP_TITLE,
-                        f"刷新失败：{type(e).__name__}: {e}\n\n" + detail[-1800:],
-                    ),
-                )
-            finally:
-                self._sync_running = False
+
+                def failed():
+                    self._sync_running = False
+                    messagebox.showerror(APP_TITLE, error_text)
+
+                self.after(0, failed)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1758,7 +1924,8 @@ class InvoiceApp(tk.Tk):
                 msg = (
                     f"邮箱扫描 {result['emails']} 封，发现 {result['links']} 个 PDF 链接。\n"
                     f"新下载 {result['downloaded']}，已存在 {result['skipped']}，失败 {result['failed']}。\n"
-                    f"当前文件夹共 {stats['total']} 张 PDF。"
+                    f"待处理重复 {sum(len(group['remove']) for group in stats['duplicates'])} 个。\n"
+                    f"当前文件夹共 {stats['total']} 个 PDF。"
                 )
                 self.set_status(f"邮箱获取完成：新下载 {result['downloaded']}，失败 {result['failed']}")
                 if result["failed"]:
@@ -1768,9 +1935,15 @@ class InvoiceApp(tk.Tk):
                         "\n\n存在失败项，因此“上次成功获取时间”没有推进，下次可以安全重试。\n\n"
                         + detail
                     )
-                    self.after(0, lambda: messagebox.showwarning(APP_TITLE, msg))
-                else:
-                    self.after(0, lambda: messagebox.showinfo(APP_TITLE, msg))
+
+                def finish_fetch():
+                    if result["failed"]:
+                        messagebox.showwarning(APP_TITLE, msg)
+                    else:
+                        messagebox.showinfo(APP_TITLE, msg)
+                    self.queue_duplicate_prompt(stats["duplicates"])
+
+                self.after(0, finish_fetch)
             except Exception as e:
                 detail = traceback.format_exc()
                 self.set_status("邮箱获取失败")

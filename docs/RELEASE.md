@@ -2,16 +2,20 @@
 
 InvoiceManager separates normal CI from release publication.
 
-Normal code changes only run CI. A new GitHub Release is created only when we explicitly decide to publish a new version.
+Normal code changes only run CI. Updating `APP_VERSION` in `version.py` and merging that change into `main` automatically runs `Build Windows Release` to test, build and publish that version. PRs do not publish releases.
 
 ## Before publishing
 
 1. Make sure the latest `CI` workflow on `main` is green.
 2. Confirm user-visible behavior is documented in `README.md`.
-3. Update `CHANGELOG.md` for meaningful changes.
+3. Increment `APP_VERSION` in `version.py` and move the changes from `Unreleased` into a matching `## vMAJOR.MINOR.PATCH` section in `CHANGELOG.md`.
 4. If privacy or security behavior changed, update `PRIVACY.md` / `SECURITY.md` as well.
 
-## Publish from GitHub Actions
+## Automatic publication and manual retry
+
+Merge the documented version bump into `main`. The release job independently runs the Windows tests before building and publishing the executable. A failed test or build stops publication.
+
+To retry an unpublished version manually, select `main` and open:
 
 Open:
 
@@ -19,10 +23,10 @@ Open:
 GitHub -> Actions -> Build Windows Release -> Run workflow
 ```
 
-Enter the next version number, for example:
+Leave the version input blank to read `version.py`, or enter the exact matching tag, for example:
 
 ```text
-v5.2.9
+v5.2.14
 ```
 
 The project uses a deliberately simple version format:
@@ -32,6 +36,8 @@ vMAJOR.MINOR.PATCH
 ```
 
 No beta / alpha suffix is required.
+
+The workflow rejects a mismatched version or missing CHANGELOG entry. Existing releases are never overwritten; use a new application version for new builds. Release notes are taken from the matching CHANGELOG section.
 
 ## Historical note about v5.2.1 ~ v5.2.8
 
