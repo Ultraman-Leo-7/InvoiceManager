@@ -2250,7 +2250,12 @@ class InvoiceApp(tk.Tk):
                 self.after(0, ask)
             except Exception as e:
                 self.set_status("检查更新失败")
-                self.after(0, lambda: messagebox.showerror("检查更新", f"检查更新失败：{type(e).__name__}: {e}"))
+                error_message = (
+                    f"检查更新失败：{type(e).__name__}: {e}\n\n"
+                    "尚未下载或替换程序，本地数据未因本次检查而更改。\n"
+                    "可稍后重试，或从项目主页的 Releases 手动下载新版。"
+                )
+                self.after(0, lambda msg=error_message: messagebox.showerror("检查更新", msg))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -2272,6 +2277,7 @@ class InvoiceApp(tk.Tk):
                     try:
                         schedule_windows_replacement(Path(sys.executable), downloaded)
                     except Exception as e:
+                        self.set_status("安装更新失败")
                         messagebox.showerror("更新失败", f"无法启动更新程序：{type(e).__name__}: {e}")
                         return
                     self.destroy()
@@ -2279,7 +2285,12 @@ class InvoiceApp(tk.Tk):
                 self.after(0, install)
             except Exception as e:
                 self.set_status("下载更新失败")
-                self.after(0, lambda: messagebox.showerror("更新失败", f"下载更新失败：{type(e).__name__}: {e}"))
+                error_message = (
+                    f"下载更新失败：{type(e).__name__}: {e}\n\n"
+                    "旧程序尚未替换，本地数据库和 PDF 保留。\n"
+                    "也可手动下载新版：退出程序后，仅替换原文件夹内的 exe，保留其他文件。"
+                )
+                self.after(0, lambda msg=error_message: messagebox.showerror("更新失败", msg))
 
         threading.Thread(target=worker, daemon=True).start()
 
