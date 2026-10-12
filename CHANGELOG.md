@@ -4,6 +4,17 @@ All notable changes to InvoiceManager will be documented here.
 
 ## Unreleased
 
+## v5.2.16
+
+### Fixed
+
+- Preserve update-check and download exceptions for deferred GUI callbacks so the actual error is shown instead of leaving only a failure status in the window
+- Show an installation-failure status and keep the application open if launching the replacement helper fails
+
+### Improved
+
+- Explain manual executable replacement and local-data preservation in update error messages and README troubleshooting
+
 ## v5.2.15
 
 ### Added
