@@ -4,6 +4,23 @@ All notable changes to InvoiceManager will be documented here.
 
 ## Unreleased
 
+## v5.2.15
+
+### Added
+
+- Fetch PDF attachments from Pinduoduo invoice emails and Alipay invoice-manager export emails in QQ Mail, alongside existing JD invoice download links
+- Validate exact sender addresses and source-specific subjects, decode attachment filenames, verify PDF bytes, and deduplicate all supported sources by SHA256
+- Preserve different-content files that share an attachment name without overwriting existing PDFs
+
+### Improved
+
+- Rename the mail action to “从QQ邮箱获取发票” and show both attachment and download-link counts
+- Start the expanded mail importer with its own successful-fetch checkpoint so an earlier JD-only download does not exclude historical Pinduoduo or Alipay mail
+
+### Fixed
+
+- Keep mailbox retrieval errors visible when the background worker reports an exception to the GUI
+
 ## v5.2.14
 
 ### Added

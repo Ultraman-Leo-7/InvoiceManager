@@ -2,7 +2,7 @@
 
 感谢你愿意帮助改进 InvoiceManager。
 
-InvoiceManager 目前主要面向 Windows 用户，用于本地电子发票管理、QQ 邮箱京东发票获取、购买记录与发票核对。
+InvoiceManager 目前主要面向 Windows 用户，用于本地电子发票管理、QQ 邮箱中的京东/拼多多/支付宝导出发票获取、购买记录与发票核对。
 
 ## 提交 Bug 前
 
@@ -68,7 +68,7 @@ dist/InvoiceManager-Windows-x64.exe
 ```text
 app.py                  GUI、SQLite、文件夹刷新、搜索、排序、删除、导出
 invoice_extract.py      PDF 发票解析
-jd_qq.py                QQ 邮箱 -> 京东电子发票
+jd_qq.py                QQ 邮箱 -> 京东链接、拼多多/支付宝导出 PDF 附件
 purchase_tracker.py     购买记录与价格匹配
 tools/generate_icon.py  Windows 图标生成
 ```

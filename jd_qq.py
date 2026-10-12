@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""QQ 邮箱 -> 京东电子发票 PDF 下载模块。"""
+"""QQ 收件箱发票导入：京东下载链接、拼多多与支付宝发票管家 PDF 附件。"""
 
 from __future__ import annotations
 
@@ -7,14 +7,16 @@ import email
 import hashlib
 import html
 import imaplib
+import os
 import re
+import tempfile
 import time
 import urllib.parse
 import urllib.request
 from datetime import datetime
 from email.header import decode_header, make_header
 from email.policy import default
-from email.utils import parsedate_to_datetime
+from email.utils import getaddresses, parsedate_to_datetime
 from html.parser import HTMLParser
 from pathlib import Path
 
@@ -23,6 +25,16 @@ IMAP_PORT = 993
 JD_SENDER = "customer_service@jd.com"
 SUBJECT_KEYWORD = "电子发票已开具"
 PDF_LINK_TEXT = "发票PDF文件下载"
+
+MAIL_SOURCES = {
+    "jd": {"name": "京东", "sender": JD_SENDER, "subject": SUBJECT_KEYWORD},
+    "pinduoduo": {
+        "name": "拼多多", "sender": "invoice@pinduoduo.com", "subject": "拼多多商家电子发票",
+    },
+    "alipay": {
+        "name": "支付宝", "sender": "service@service.kfp.cn", "subject": "发票导出成功提醒",
+    },
+}
 
 
 def decode_mime_header(value: str) -> str:
@@ -189,7 +201,9 @@ def _sha256_bytes(data: bytes) -> str:
 
 def _existing_pdf_hashes(output_dir: Path) -> set[str]:
     result = set()
-    for path in output_dir.glob("*.pdf"):
+    for path in output_dir.iterdir():
+        if path.suffix.lower() != ".pdf" or not path.is_file():
+            continue
         try:
             h = hashlib.sha256()
             with path.open("rb") as f:
@@ -238,26 +252,128 @@ def _download_pdf(url: str, retries=3):
     return None, last_error
 
 
-def fetch_jd_invoices(
+def _message_source(msg, sources) -> str | None:
+    # IMAP FROM is a substring search; verify the actual mailbox after fetching.
+    try:
+        addresses = getaddresses([str(value) for value in msg.get_all("From", [])])
+    except (TypeError, ValueError):
+        return None
+    if len(addresses) != 1:
+        return None
+    sender = addresses[0][1].strip().lower()
+    subject = decode_mime_header(str(msg.get("Subject", "")))
+    for source in sources:
+        rule = MAIL_SOURCES[source]
+        if sender == rule["sender"] and rule["subject"] in subject:
+            return source
+    return None
+
+
+def _pdf_attachments(msg):
+    for part in msg.walk():
+        if part.is_multipart():
+            continue
+        filename = decode_mime_header(part.get_filename() or "")
+        if part.get_content_type() != "application/pdf" and not filename.lower().endswith(".pdf"):
+            continue
+        yield filename or "发票.pdf", part.get_payload(decode=True) or b""
+
+
+def _save_pdf(data: bytes, output_dir: Path, stem: str, digest: str) -> Path:
+    """Publish a completed file without replacing any existing path."""
+    stem = safe_filename(stem)
+    tmp = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            prefix=".invoice-", suffix=".part", dir=output_dir, delete=False,
+        ) as stream:
+            tmp = Path(stream.name)
+            stream.write(data)
+        attempt = 0
+        while True:
+            if attempt == 0:
+                filename = f"{stem}.pdf"
+            elif attempt == 1:
+                filename = f"{stem}_{digest[:12]}.pdf"
+            else:
+                filename = f"{stem}_{digest[:12]}_({attempt}).pdf"
+            target = output_dir / filename
+            # lexists also protects directories and dangling symbolic links.
+            if os.path.lexists(target):
+                attempt += 1
+                continue
+            try:
+                if os.name == "nt":
+                    # Windows rename fails if target appears concurrently.
+                    os.rename(tmp, target)
+                else:
+                    # POSIX rename replaces existing files; link creates exclusively.
+                    os.link(tmp, target)
+                return target
+            except FileExistsError:
+                attempt += 1
+    finally:
+        if tmp is not None:
+            tmp.unlink(missing_ok=True)
+
+
+def fetch_qq_invoices(
     email_addr: str,
     auth_code: str,
     output_dir: Path,
     start_time=None,
     progress=None,
+    sources=None,
 ) -> dict:
-    """从 QQ 邮箱收件箱下载京东电子发票 PDF 到 output_dir。"""
+    """Import approved invoice emails from QQ INBOX, without changing the mailbox.
+
+    sources: jd / pinduoduo / alipay; None selects all three.
+    emails counts matching messages; links counts unique JD URLs; attachments
+    counts PDF attachment candidates. File outcomes are downloaded/skipped/failed;
+    failed also includes unreadable messages or messages with no supported PDF.
+    Content hashes, never filenames or invoice numbers, determine duplicates.
+    """
+    if sources is None:
+        sources = tuple(MAIL_SOURCES)
+    elif isinstance(sources, str):
+        sources = (sources,)
+    else:
+        sources = tuple(dict.fromkeys(sources))
+    if not sources or any(source not in MAIL_SOURCES for source in sources):
+        raise ValueError("发票来源必须是 jd、pinduoduo 或 alipay")
+
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     start_dt, imap_date = parse_start_time(start_time)
-
-    result = {
-        "emails": 0,
-        "links": 0,
-        "downloaded": 0,
-        "skipped": 0,
-        "failed": 0,
-        "errors": [],
+    counters = ("emails", "links", "attachments", "downloaded", "skipped", "failed")
+    result = {key: 0 for key in counters}
+    result["errors"] = []
+    result["sources"] = {
+        source: {key: 0 for key in counters} for source in sources
     }
+    existing_hashes = _existing_pdf_hashes(output_dir)
+
+    def count(source, key):
+        result[key] += 1
+        result["sources"][source][key] += 1
+
+    def save_candidate(source, stem, data, error=""):
+        if data is None or not data.startswith(b"%PDF-"):
+            count(source, "failed")
+            result["errors"].append(f"{stem}: {error or '附件内容不是 PDF'}")
+            return
+        digest = _sha256_bytes(data)
+        if digest in existing_hashes:
+            count(source, "skipped")
+            return
+        try:
+            _save_pdf(data, output_dir, stem, digest)
+        except Exception as exc:
+            count(source, "failed")
+            result["errors"].append(f"{stem}: {type(exc).__name__}: {exc}")
+        else:
+            existing_hashes.add(digest)
+            count(source, "downloaded")
 
     mail = None
     try:
@@ -269,47 +385,66 @@ def fetch_jd_invoices(
         if typ != "OK":
             raise RuntimeError("无法以只读方式打开 QQ 邮箱收件箱")
 
-        if imap_date:
-            criteria = f'(FROM "{JD_SENDER}" SINCE {imap_date})'
-        else:
-            criteria = f'(FROM "{JD_SENDER}")'
+        uids = []
+        seen_uids = set()
+        for source in sources:
+            rule = MAIL_SOURCES[source]
+            criteria = f'(FROM "{rule["sender"]}"'
+            if imap_date:
+                criteria += f" SINCE {imap_date}"
+            criteria += ")"
+            typ, data = mail.uid("search", None, criteria)
+            if typ != "OK":
+                raise RuntimeError(f"搜索{rule['name']}邮件失败")
+            for uid in data[0].split() if data and data[0] else []:
+                if uid not in seen_uids:
+                    seen_uids.add(uid)
+                    uids.append(uid)
 
-        typ, data = mail.uid("search", None, criteria)
-        if typ != "OK":
-            raise RuntimeError("搜索京东邮件失败")
-
-        uids = data[0].split() if data and data[0] else []
-        candidates = []
-
+        seen_urls = set()
         for i, uid in enumerate(uids, 1):
             if progress:
-                progress(f"扫描京东邮件 {i}/{len(uids)}...")
-
-            typ, fetched = mail.uid("fetch", uid, "(RFC822)")
+                progress(f"扫描发票邮件 {i}/{len(uids)}...")
+            typ, fetched = mail.uid("fetch", uid, "(BODY.PEEK[])")
             if typ != "OK":
+                result["failed"] += 1
+                result["errors"].append("读取一封候选邮件失败，可稍后重试")
                 continue
-            raw = None
-            for item in fetched:
-                if isinstance(item, tuple) and len(item) >= 2:
-                    raw = item[1]
-                    break
+            raw = next(
+                (item[1] for item in fetched or []
+                 if isinstance(item, tuple) and len(item) >= 2 and isinstance(item[1], bytes)),
+                None,
+            )
             if not raw:
+                result["failed"] += 1
+                result["errors"].append("候选邮件内容为空，可稍后重试")
                 continue
-
             msg = email.message_from_bytes(raw, policy=default)
+            source = _message_source(msg, sources)
+            if source is None:
+                continue
             if start_dt is not None:
                 dt = message_time(msg)
                 if dt is not None and dt < start_dt:
                     continue
-
-            subject = decode_mime_header(msg.get("Subject", ""))
-            if SUBJECT_KEYWORD not in subject:
+            count(source, "emails")
+            if source != "jd":
+                attachment_count = 0
+                for filename, data in _pdf_attachments(msg):
+                    attachment_count += 1
+                    count(source, "attachments")
+                    # A digest suffix avoids common attachment-name collisions.
+                    attachment_stem = filename[:-4] if filename.lower().endswith(".pdf") else filename
+                    stem = f"{MAIL_SOURCES[source]['name']}_{safe_filename(attachment_stem)[:120]}_{_sha256_bytes(data)[:12]}"
+                    save_candidate(source, stem, data)
+                if not attachment_count:
+                    count(source, "failed")
+                    result["errors"].append(f"{MAIL_SOURCES[source]['name']}邮件未找到 PDF 附件（暂不支持压缩包或下载页面）")
                 continue
 
-            result["emails"] += 1
-            order_no = extract_order_number(subject)
+            subject = decode_mime_header(str(msg.get("Subject", "")))
+            order = extract_order_number(subject) or f"邮件{uid.decode(errors='ignore')}"
             link_index = 0
-
             for body in extract_html_bodies(msg):
                 parser = InvoiceLinkParser()
                 try:
@@ -321,77 +456,36 @@ def fetch_jd_invoices(
                     if not url:
                         continue
                     link_index += 1
-                    candidates.append(
-                        {
-                            "uid": uid.decode(errors="ignore"),
-                            "order_no": order_no,
-                            "invoice_no": extract_invoice_number(link.get("context", "")),
-                            "index": link_index,
-                            "url": url,
-                        }
-                    )
-
-        deduped = []
-        seen = set()
-        for item in candidates:
-            key = (
-                ("invoice", item["invoice_no"])
-                if item["invoice_no"]
-                else ("url", item["url"])
-            )
-            if key in seen:
-                continue
-            seen.add(key)
-            deduped.append(item)
-
-        result["links"] = len(deduped)
-        existing_hashes = _existing_pdf_hashes(output_dir)
-
-        for i, item in enumerate(deduped, 1):
-            if progress:
-                progress(f"下载发票 {i}/{len(deduped)}...")
-
-            order = item["order_no"] or f"邮件{item['uid']}"
-            if item["invoice_no"]:
-                stem = f"{order}_{item['invoice_no']}"
-            else:
-                stem = f"{order}_发票{item['index']}"
-            target = output_dir / (safe_filename(stem) + ".pdf")
-
-            if target.exists() and target.stat().st_size > 4:
-                result["skipped"] += 1
-                continue
-
-            data, error = _download_pdf(item["url"])
-            if data is None:
-                result["failed"] += 1
-                result["errors"].append(f"{stem}: {error}")
-                continue
-
-            digest = _sha256_bytes(data)
-            if digest in existing_hashes:
-                result["skipped"] += 1
-                continue
-
-            tmp = target.with_suffix(".pdf.part")
-            try:
-                tmp.write_bytes(data)
-                tmp.replace(target)
-                existing_hashes.add(digest)
-                result["downloaded"] += 1
-            except Exception as e:
-                try:
-                    tmp.unlink(missing_ok=True)
-                except Exception:
-                    pass
-                result["failed"] += 1
-                result["errors"].append(f"{stem}: {type(e).__name__}: {e}")
-
+                    if url in seen_urls:
+                        continue
+                    seen_urls.add(url)
+                    count(source, "links")
+                    invoice_no = extract_invoice_number(link.get("context", ""))
+                    stem = f"{order}_{invoice_no}" if invoice_no else f"{order}_发票{link_index}"
+                    if progress:
+                        progress(f"下载京东发票 {result['links']}...")
+                    data, error = _download_pdf(url)
+                    save_candidate(source, stem, data, error)
+            if not link_index:
+                count(source, "failed")
+                result["errors"].append("京东邮件未找到发票 PDF 下载链接")
         return result
-
     finally:
         if mail is not None:
             try:
                 mail.logout()
             except Exception:
                 pass
+
+
+def fetch_jd_invoices(
+    email_addr: str,
+    auth_code: str,
+    output_dir: Path,
+    start_time=None,
+    progress=None,
+) -> dict:
+    """Backward-compatible JD-only entry point."""
+    return fetch_qq_invoices(
+        email_addr, auth_code, output_dir, start_time, progress, sources=("jd",),
+    )
