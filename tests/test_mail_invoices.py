@@ -3,6 +3,8 @@
 import hashlib
 import io
 import os
+import urllib.error
+import zipfile
 from datetime import datetime, timedelta, timezone
 from email.header import Header
 from email.message import EmailMessage
@@ -90,6 +92,49 @@ def mailbox(monkeypatch):
 
 def fetch(tmp_path, **kwargs):
     return jd_qq.fetch_qq_invoices("test@example.invalid", "test-auth-code", tmp_path, **kwargs)
+
+
+def jd_link_message(*links):
+    msg = invoice_message("jd")
+    msg.get_payload()[1].set_content(
+        "".join(f'<a href="{url}">{label}</a>' for url, label in links),
+        subtype="html",
+    )
+    return msg
+
+
+@pytest.fixture
+def response_mailbox(mailbox, monkeypatch):
+    """Exercise the real downloader using synthetic in-memory HTTP responses."""
+    real_download = jd_qq._download_pdf
+
+    def configure(messages, responses):
+        mailbox(messages)
+        monkeypatch.setattr(jd_qq, "_download_pdf", real_download)
+        monkeypatch.setattr(jd_qq.time, "sleep", lambda seconds: None)
+        requested_urls = []
+
+        class Response(io.BytesIO):
+            def __init__(self, url, body, content_type):
+                super().__init__(body)
+                self.url = url
+                self.headers = {"Content-Type": content_type}
+
+            def geturl(self):
+                return self.url
+
+        def urlopen(request, timeout):
+            url = request.full_url
+            requested_urls.append(url)
+            response = responses[url]
+            if isinstance(response, Exception):
+                raise response
+            return Response(url, *response)
+
+        monkeypatch.setattr(jd_qq.urllib.request, "urlopen", urlopen)
+        return requested_urls
+
+    return configure
 
 
 def test_all_three_sources_and_readonly_mailbox(tmp_path, mailbox, monkeypatch):
@@ -443,37 +488,183 @@ def test_jd_old_and_new_template_download_and_rescan_skip_same_content(tmp_path,
     assert renamed.read_bytes() == PDF_A
 
 
-@pytest.mark.parametrize("body, content_type", [
-    (b"<?xml version='1.0'?><invoice/>", "application/xml"),
-    (b"<html>invoice download expired</html>", "text/html"),
-])
-def test_jd_generic_download_entry_rejects_actual_non_pdf_response(tmp_path, mailbox, monkeypatch, body, content_type):
-    msg = invoice_message("jd")
-    msg.get_payload()[1].set_content(
-        f'<a href="{JD_URL}">发票文件下载</a>', subtype="html",
+def test_jd_normal_xml_only_reports_missing_pdf_for_the_message(tmp_path, response_mailbox):
+    requested_urls = response_mailbox(
+        [jd_link_message((JD_URL, "发票文件下载"))],
+        {JD_URL: (b"<?xml version='1.0'?><invoice/>", "application/xml")},
     )
-    # Exercise the real downloader rather than the mailbox fixture's shortcut.
-    real_download = jd_qq._download_pdf
-    mailbox([msg])
-    monkeypatch.setattr(jd_qq, "_download_pdf", real_download)
-    requested_urls = []
-
-    class Response(io.BytesIO):
-        headers = {"Content-Type": content_type}
-
-        def geturl(self):
-            return JD_URL
-
-    def urlopen(request, timeout):
-        requested_urls.append(request.full_url)
-        return Response(body)
-
-    monkeypatch.setattr(jd_qq.urllib.request, "urlopen", urlopen)
     result = fetch(tmp_path)
     assert requested_urls == [JD_URL]
-    assert (result["links"], result["downloaded"], result["failed"]) == (1, 0, 1)
-    assert "返回内容不是 PDF" in result["errors"][0]
+    assert (result["links"], result["downloaded"], result["skipped"], result["failed"]) == (1, 0, 0, 1)
+    assert len(result["errors"]) == 1
+    assert "未取得 PDF" in result["errors"][0]
     assert result["sources"]["jd"]["failed"] == 1
+    assert list(tmp_path.iterdir()) == []
+
+
+def normal_zip_bytes():
+    stream = io.BytesIO()
+    with zipfile.ZipFile(stream, "w") as archive:
+        archive.writestr("invoice.xml", "<invoice/>")
+    return stream.getvalue()
+
+
+@pytest.mark.parametrize("body, content_type", [
+    (b"<?xml version='1.0'?><Invoice><Number>synthetic-01</Number></Invoice>", "application/xml"),
+    (b"<?xml version='1.0'?><Invoice/>", "application/octet-stream"),
+    (normal_zip_bytes(), "application/zip"),
+])
+def test_jd_pdf_and_unlabelled_normal_non_pdf_only_count_pdf(
+    tmp_path, response_mailbox, body, content_type,
+):
+    extra_url = "https://example.invalid/download?file=other"
+    requested_urls = response_mailbox(
+        [jd_link_message((JD_URL, "发票PDF文件下载"), (extra_url, "发票文件下载"))],
+        {JD_URL: (PDF_A, "application/pdf"), extra_url: (body, content_type)},
+    )
+    result = fetch(tmp_path)
+    assert requested_urls == [JD_URL, extra_url]
+    assert (result["emails"], result["links"], result["downloaded"], result["skipped"], result["failed"]) == (1, 2, 1, 0, 0)
+    assert result["errors"] == []
+    assert [path.read_bytes() for path in tmp_path.iterdir()] == [PDF_A]
+
+
+def test_jd_explicit_xml_link_is_not_requested(tmp_path, response_mailbox):
+    xml_label_url = "https://example.invalid/download?file=xml"
+    xml_path_url = "https://example.invalid/invoice.xml?signature=synthetic"
+    requested_urls = response_mailbox(
+        [jd_link_message(
+            (xml_label_url, "发票XML文件下载"),
+            (xml_path_url, "发票文件下载"),
+            (JD_URL, "发票PDF文件下载"),
+        )],
+        {JD_URL: (PDF_A, "application/pdf")},
+    )
+    result = fetch(tmp_path)
+    assert requested_urls == [JD_URL]
+    assert (result["links"], result["downloaded"], result["skipped"], result["failed"]) == (1, 1, 0, 0)
+    assert result["errors"] == []
+
+
+@pytest.mark.parametrize("body, content_type, reason", [
+    (b"<html><body>Invoice download expired</body></html>", "text/html", "网页"),
+    (b"<html><body>Login required</body></html>", "application/xml", "网页"),
+    (b"<Error><Code>AccessDenied</Code><Message>Expired link</Message></Error>", "application/xml", "AccessDenied"),
+    (b"<Error><Code>AccessDenied</Code></Error>", "application/octet-stream", "AccessDenied"),
+    (b"", "application/pdf", "内容为空"),
+])
+def test_jd_page_error_response_and_empty_content_remain_specific_failure(
+    tmp_path, response_mailbox, body, content_type, reason,
+):
+    requested_urls = response_mailbox(
+        [jd_link_message((JD_URL, "发票文件下载"))],
+        {JD_URL: (body, content_type)},
+    )
+    result = fetch(tmp_path)
+    assert requested_urls == [JD_URL]
+    assert (result["downloaded"], result["skipped"], result["failed"]) == (0, 0, 1)
+    assert len(result["errors"]) == 1
+    assert "UID：1" in result["errors"][0]
+    assert reason in result["errors"][0]
+    assert "｜文件：" in result["errors"][0]
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("error, expected", [
+    (urllib.error.HTTPError(JD_URL, 403, "Forbidden", {}, None), "HTTPError"),
+    (TimeoutError("synthetic timeout"), "TimeoutError"),
+])
+def test_jd_transport_failures_keep_reason_and_do_not_add_missing_pdf_failure(
+    tmp_path, response_mailbox, error, expected,
+):
+    requested_urls = response_mailbox(
+        [jd_link_message((JD_URL, "发票文件下载"))], {JD_URL: error},
+    )
+    result = fetch(tmp_path)
+    assert requested_urls == [JD_URL] * 3
+    assert (result["downloaded"], result["skipped"], result["failed"]) == (0, 0, 1)
+    assert len(result["errors"]) == 1
+    assert expected in result["errors"][0]
+    assert "未取得 PDF" not in result["errors"][0]
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_jd_pdf_does_not_hide_xml_error_response(tmp_path, response_mailbox):
+    error_url = "https://example.invalid/download?file=expired"
+    requested_urls = response_mailbox(
+        [jd_link_message((JD_URL, "发票PDF文件下载"), (error_url, "发票文件下载"))],
+        {
+            JD_URL: (PDF_A, "application/pdf"),
+            error_url: (b"<Error><Code>ExpiredToken</Code></Error>", "application/xml"),
+        },
+    )
+    result = fetch(tmp_path)
+    assert requested_urls == [JD_URL, error_url]
+    assert (result["downloaded"], result["skipped"], result["failed"]) == (1, 0, 1)
+    assert len(result["errors"]) == 1
+    assert "ExpiredToken" in result["errors"][0]
+    assert [path.read_bytes() for path in tmp_path.iterdir()] == [PDF_A]
+
+
+@pytest.mark.parametrize("body, content_type, expected_failures", [
+    (PDF_A, "application/pdf", 0),
+    (b"<Invoice/>", "application/xml", 2),
+    (b"<Error><Code>AccessDenied</Code></Error>", "application/xml", 2),
+])
+def test_jd_repeated_url_across_messages_preserves_each_message_outcome(
+    tmp_path, response_mailbox, body, content_type, expected_failures,
+):
+    requested_urls = response_mailbox(
+        [jd_link_message((JD_URL, "发票文件下载")) for _ in range(2)],
+        {JD_URL: (body, content_type)},
+    )
+    result = fetch(tmp_path)
+    assert requested_urls == [JD_URL]
+    assert (result["emails"], result["links"], result["skipped"], result["failed"]) == (2, 1, 0, expected_failures)
+    assert result["downloaded"] == (1 if body == PDF_A else 0)
+    assert len(result["errors"]) == expected_failures
+    if expected_failures:
+        assert "UID：1" in result["errors"][0] and "UID：2" in result["errors"][1]
+        if body == b"<Invoice/>":
+            assert all("未取得 PDF" in error for error in result["errors"])
+        else:
+            assert all("AccessDenied" in error for error in result["errors"])
+        assert list(tmp_path.iterdir()) == []
+
+
+def test_jd_multiple_ignored_files_add_only_one_missing_pdf_failure(tmp_path, response_mailbox):
+    second_url = "https://example.invalid/download?file=second"
+    requested_urls = response_mailbox(
+        [jd_link_message(
+            (JD_URL, "发票文件下载"),
+            (JD_URL, "获取发票"),
+            (second_url, "发票文件下载"),
+        )],
+        {
+            JD_URL: (b"<Invoice/>", "application/xml"),
+            second_url: (normal_zip_bytes(), "application/zip"),
+        },
+    )
+    result = fetch(tmp_path)
+    assert requested_urls == [JD_URL, second_url]
+    assert (result["links"], result["downloaded"], result["skipped"], result["failed"]) == (2, 0, 0, 1)
+    assert len(result["errors"]) == 1 and "未取得 PDF" in result["errors"][0]
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_jd_multiple_bad_downloads_do_not_add_extra_missing_pdf_failure(tmp_path, response_mailbox):
+    second_url = "https://example.invalid/download?file=second"
+    response_mailbox(
+        [jd_link_message((JD_URL, "发票文件下载"), (second_url, "发票文件下载"))],
+        {
+            JD_URL: (b"<html>Expired</html>", "text/html"),
+            second_url: (b"<Error><Code>AccessDenied</Code></Error>", "application/xml"),
+        },
+    )
+    result = fetch(tmp_path)
+    assert (result["downloaded"], result["skipped"], result["failed"]) == (0, 0, 2)
+    assert len(result["errors"]) == 2
+    assert "网页" in result["errors"][0] and "AccessDenied" in result["errors"][1]
     assert list(tmp_path.iterdir()) == []
 
 

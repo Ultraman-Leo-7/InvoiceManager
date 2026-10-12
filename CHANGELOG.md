@@ -4,6 +4,15 @@ All notable changes to InvoiceManager will be documented here.
 
 ## Unreleased
 
+## v5.2.19
+
+### Fixed
+
+- Silently ignore normal XML, ZIP containers (including OFD) and PNG/JPEG/GIF files returned by JD invoice download entries, without counting them as failures or content duplicates; retain PDF-header validation errors for mail attachments declared as PDFs
+- Keep explicit XML/OFD/archive links excluded before downloading; only save PDF candidates that pass the existing PDF-header check
+- Report one missing-PDF failure for a matching message with no usable PDF, without adding a second message-level failure when a specific request or file error already explains the problem
+- Retain specific failures for HTML pages, service errors, abnormal responses and download/save errors; these failures continue to prevent advancing the last successful fetch time
+
 ## v5.2.18
 
 ### Fixed
