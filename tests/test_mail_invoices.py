@@ -203,6 +203,9 @@ def test_non_pdf_attachment_bytes_fail_without_files(tmp_path, mailbox, data):
     result = fetch(tmp_path)
     assert (result["attachments"], result["downloaded"], result["failed"]) == (1, 0, 1)
     assert "不是 PDF" in result["errors"][0]
+    assert "支付宝管家｜主题：发票导出成功提醒" in result["errors"][0]
+    assert "UID：1｜文件：测试发票.pdf" in result["errors"][0]
+    assert result["sources"]["alipay"]["failed"] == 1
     assert list(tmp_path.iterdir()) == []
 
 
@@ -216,6 +219,51 @@ def test_matched_message_without_supported_pdf_reports_failure(tmp_path, mailbox
     result = fetch(tmp_path)
     assert (result["emails"], result["downloaded"], result["failed"]) == (1, 0, 1)
     assert "未找到" in result["errors"][0]
+    name = "支付宝管家" if source == "alipay" else jd_qq.MAIL_SOURCES[source]["name"]
+    assert result["errors"][0].startswith(f"{name}｜主题：")
+    assert "｜时间：2026-10-12 " in result["errors"][0]
+    assert "｜UID：1" in result["errors"][0]
+    assert result["sources"][source]["failed"] == 1
+
+
+def test_identical_failures_identify_each_encoded_chinese_message(tmp_path, mailbox):
+    messages = []
+    for suffix in ("合成甲", "合成乙"):
+        msg = invoice_message("pinduoduo", data=None)
+        msg.replace_header("Subject", Header(f"拼多多商家电子发票 {suffix}", "utf-8").encode())
+        assert b"=?utf-8?" in msg.as_bytes().lower()
+        messages.append(msg)
+    mailbox(messages)
+    result = fetch(tmp_path)
+    assert result["failed"] == result["sources"]["pinduoduo"]["failed"] == 2
+    first, second = result["errors"]
+    assert "主题：拼多多商家电子发票 合成甲" in first and "UID：1" in first
+    assert "主题：拼多多商家电子发票 合成乙" in second and "UID：2" in second
+    assert all("未找到 PDF 附件" in error for error in result["errors"])
+
+
+@pytest.mark.parametrize("date, expected", [(None, "未提供"), ("synthetic invalid date", "synthetic invalid date")])
+def test_missing_or_invalid_message_date_keeps_error_useful(tmp_path, mailbox, date, expected):
+    msg = invoice_message("alipay", data=None)
+    del msg["Date"]
+    mail = mailbox([msg])
+    if date is not None:
+        # EmailMessage serialization drops an invalid Date; mimic wire bytes.
+        mail.messages[b"1"] = f"Date: {date}\n".encode() + mail.messages[b"1"]
+    result = fetch(tmp_path)
+    assert f"｜时间：{expected}｜UID：1" in result["errors"][0]
+
+
+def test_error_headers_collapse_controls_and_limit_long_subjects(tmp_path, mailbox):
+    msg = invoice_message("pinduoduo", data=None)
+    msg.replace_header("Subject", "拼多多商家电子发票\t\t合成\x00标题\u202e " + "长" * 500)
+    mailbox([msg])
+    error = fetch(tmp_path)["errors"][0]
+    subject = error.split("主题：", 1)[1].split("｜时间：", 1)[0]
+    assert subject.startswith("拼多多商家电子发票 合成 标题 ")
+    assert len(subject) == 100 and subject.endswith("…")
+    assert not any(char in error for char in ("\r", "\n", "\t", "\x00", "\u202e"))
+    assert "｜UID：1" in error
 
 
 def test_legacy_entrypoint_fetches_only_jd(tmp_path, mailbox):
@@ -283,6 +331,11 @@ def test_write_failure_cleans_temp_and_preserves_existing_files(tmp_path, mailbo
     monkeypatch.setattr(jd_qq.os, "rename" if os.name == "nt" else "link", denied)
     result = fetch(tmp_path)
     assert result["failed"] == 1 and result["downloaded"] == 0
+    error = result["errors"][0]
+    assert "支付宝管家｜主题：发票导出成功提醒" in error
+    assert "UID：1｜文件：测试发票.pdf" in error
+    assert "保存 PDF 失败：PermissionError: synthetic failure" in error
+    assert result["sources"]["alipay"]["failed"] == 1
     assert original.read_bytes() == PDF_B
     assert list(tmp_path.iterdir()) == [original]
 
@@ -297,6 +350,8 @@ def test_unreadable_message_reports_failure_and_logs_out(tmp_path, mailbox, empt
     result = fetch(tmp_path)
     assert result["failed"] == 1
     assert result["errors"]
+    assert "来源未确定｜UID：1" in result["errors"][0]
+    assert all(stats["failed"] == stats["emails"] == 0 for stats in result["sources"].values())
     assert mail.logged_out
 
 
@@ -306,8 +361,23 @@ def test_download_failure_logs_out_and_preserves_files(tmp_path, mailbox, monkey
     result = fetch(tmp_path)
     assert result["failed"] == 1
     assert "synthetic expired link" in result["errors"][0]
+    assert "京东｜主题：电子发票已开具" in result["errors"][0]
+    assert "UID：1｜文件：邮件1_00000000000000000001" in result["errors"][0]
+    assert result["sources"]["jd"]["failed"] == 1
     assert list(tmp_path.iterdir()) == []
     assert mail.logged_out
+
+
+def test_transport_diagnostics_do_not_echo_signed_urls_or_auth_codes(tmp_path, mailbox, monkeypatch):
+    mailbox([invoice_message("jd")])
+    monkeypatch.setattr(
+        jd_qq, "_download_pdf",
+        lambda url: (None, "TimeoutError: https://example.invalid/invoice?token=synthetic-secret test-auth-code"),
+    )
+    error = fetch(tmp_path)["errors"][0]
+    assert "TimeoutError:" in error
+    assert "[链接已隐藏]" in error and "[授权码已隐藏]" in error
+    assert "synthetic-secret" not in error and "test-auth-code" not in error
 
 
 def test_login_error_logs_out(tmp_path, mailbox, monkeypatch):

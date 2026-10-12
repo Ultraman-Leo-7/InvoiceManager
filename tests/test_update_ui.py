@@ -15,9 +15,15 @@ class ImmediateThread:
 
 
 class UpdateView:
+    set_update_status = app.InvoiceApp.set_update_status
+
     def __init__(self):
         self.callbacks = []
         self.statuses = []
+        self.update_statuses = []
+        self.status_var = SimpleNamespace(set=self.statuses.append)
+        self.update_status_var = SimpleNamespace(set=self.update_statuses.append)
+        self._update_busy = False
         self.destroy = Mock()
         self.download_and_install_update = Mock()
 
@@ -108,13 +114,97 @@ def test_download_failure_shows_error_without_installing_or_closing(update_case)
     assert case.notices == []
     case.view.finish_callbacks()
 
-    case.download.assert_called_once_with(release, case.folder)
+    case.download.assert_called_once_with(release, case.folder, progress=case.view.set_update_status)
     assert case.view.statuses[-1] == "下载更新失败"
     assert len(case.notices) == 1
     assert "RuntimeError" in case.notices[0][1]
     assert "SHA256 校验失败" in case.notices[0][1]
     case.replace.assert_not_called()
     case.view.destroy.assert_not_called()
+    assert_local_data_unchanged(case)
+
+
+def test_download_progress_reaches_both_views_on_ui_callbacks(update_case):
+    case = update_case
+    progress_text = "下载更新：42.5% · 17.0 MiB / 40.0 MiB · 1.8 MiB/s"
+
+    def download(release, directory, *, progress):
+        progress(progress_text)
+        progress("正在下载校验文件...")
+        progress("正在校验 SHA256...")
+        # The worker must not write directly to Tk variables.
+        assert case.view.update_statuses == case.view.statuses == []
+        return case.downloaded_exe
+
+    case.download.side_effect = download
+    app.InvoiceApp.download_and_install_update(case.view, {}, "9.0.0")
+    case.view.finish_callbacks()
+
+    assert case.view.update_statuses == case.view.statuses
+    assert progress_text in case.view.update_statuses
+    assert case.view.update_statuses.index(progress_text) < case.view.update_statuses.index("正在校验 SHA256...")
+    assert "通过 SHA256 校验" in case.view.update_statuses[-1]
+    assert_local_data_unchanged(case)
+
+
+def test_repeated_update_action_does_not_start_second_download(update_case):
+    case = update_case
+    app.InvoiceApp.download_and_install_update(case.view, {}, "9.0.0")
+    app.InvoiceApp.download_and_install_update(case.view, {}, "9.0.0")
+    app.InvoiceApp.check_for_updates(case.view)
+
+    assert case.download.call_count == 1
+    case.view.finish_callbacks()
+    assert case.replace.call_count == 1
+
+
+def test_download_can_be_retried_after_failure(update_case):
+    case = update_case
+    case.download.side_effect = RuntimeError("测试连接中断")
+    app.InvoiceApp.download_and_install_update(case.view, {}, "9.0.0")
+    case.view.finish_callbacks()
+    assert not case.view._update_busy
+
+    case.download.side_effect = None
+    app.InvoiceApp.download_and_install_update(case.view, {}, "9.0.0")
+    case.view.finish_callbacks()
+    assert case.download.call_count == 2
+    case.replace.assert_called_once()
+
+
+def test_check_can_be_retried_after_failure(update_case, monkeypatch):
+    case = update_case
+    check = Mock(side_effect=RuntimeError("测试检查失败"))
+    monkeypatch.setattr(app, "latest_release", check)
+    app.InvoiceApp.check_for_updates(case.view)
+    app.InvoiceApp.check_for_updates(case.view)
+    assert check.call_count == 1
+    case.view.finish_callbacks()
+    assert not case.view._update_busy
+
+    check.side_effect = None
+    check.return_value = {"available": False, "latest": app.APP_VERSION}
+    app.InvoiceApp.check_for_updates(case.view)
+    case.view.finish_callbacks()
+    assert check.call_count == 2
+    assert not case.view._update_busy
+
+
+def test_accepting_update_releases_check_guard_before_download(update_case, monkeypatch):
+    case = update_case
+    release = {"tag_name": "v9.0.0"}
+    monkeypatch.setattr(app, "latest_release", lambda version: {
+        "available": True, "latest": "9.0.0", "release": release,
+    })
+    case.view.download_and_install_update = lambda release, latest: app.InvoiceApp.download_and_install_update(
+        case.view, release, latest,
+    )
+
+    app.InvoiceApp.check_for_updates(case.view)
+    case.view.finish_callbacks()
+
+    case.download.assert_called_once_with(release, case.folder, progress=case.view.set_update_status)
+    case.replace.assert_called_once()
     assert_local_data_unchanged(case)
 
 

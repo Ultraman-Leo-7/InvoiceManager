@@ -11,6 +11,7 @@ import os
 import re
 import tempfile
 import time
+import unicodedata
 import urllib.parse
 import urllib.request
 from datetime import datetime
@@ -195,6 +196,29 @@ def message_time(msg):
     return dt.astimezone(local_tz)
 
 
+def _diagnostic_text(value, limit=160) -> str:
+    """Keep untrusted mail headers and errors readable in one bounded line."""
+    text = str(value)
+    text = "".join(" " if unicodedata.category(char).startswith("C") else char for char in text)
+    text = re.sub(r"https?://[^\s<>\"']+", "[链接已隐藏]", text, flags=re.IGNORECASE)
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def _message_error_context(msg, source, uid) -> str:
+    name = "支付宝管家" if source == "alipay" else MAIL_SOURCES[source]["name"]
+    subject = _diagnostic_text(decode_mime_header(str(msg.get("Subject", ""))), 100) or "无主题"
+    try:
+        dt = message_time(msg)
+    except (ValueError, OverflowError, OSError):
+        dt = None
+    date = dt.strftime("%Y-%m-%d %H:%M:%S %z") if dt is not None else (
+        _diagnostic_text(msg.get("Date", ""), 60) or "未提供"
+    )
+    uid_text = _diagnostic_text(uid.decode("ascii", errors="replace"), 40)
+    return f"{name}｜主题：{subject}｜时间：{date}｜UID：{uid_text}"
+
+
 def _sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -357,10 +381,19 @@ def fetch_qq_invoices(
         result[key] += 1
         result["sources"][source][key] += 1
 
-    def save_candidate(source, stem, data, error=""):
+    def report_error(context, detail):
+        # A transport exception can include a signed URL. Never echo credentials
+        # or download URLs while adding more useful mail identification.
+        if auth_code:
+            context = context.replace(auth_code, "[授权码已隐藏]")
+            detail = str(detail).replace(auth_code, "[授权码已隐藏]")
+        result["errors"].append(f"{context}：{_diagnostic_text(detail, 300)}")
+
+    def save_candidate(source, stem, data, context, error="", filename=""):
+        file_context = f"{context}｜文件：{_diagnostic_text(filename or stem, 140)}"
         if data is None or not data.startswith(b"%PDF-"):
             count(source, "failed")
-            result["errors"].append(f"{stem}: {error or '附件内容不是 PDF'}")
+            report_error(file_context, error or "附件内容不是 PDF")
             return
         digest = _sha256_bytes(data)
         if digest in existing_hashes:
@@ -370,7 +403,7 @@ def fetch_qq_invoices(
             _save_pdf(data, output_dir, stem, digest)
         except Exception as exc:
             count(source, "failed")
-            result["errors"].append(f"{stem}: {type(exc).__name__}: {exc}")
+            report_error(file_context, f"保存 PDF 失败：{type(exc).__name__}: {exc}")
         else:
             existing_hashes.add(digest)
             count(source, "downloaded")
@@ -406,9 +439,10 @@ def fetch_qq_invoices(
             if progress:
                 progress(f"扫描发票邮件 {i}/{len(uids)}...")
             typ, fetched = mail.uid("fetch", uid, "(BODY.PEEK[])")
+            uid_context = f"来源未确定｜UID：{_diagnostic_text(uid.decode('ascii', errors='replace'), 40)}"
             if typ != "OK":
                 result["failed"] += 1
-                result["errors"].append("读取一封候选邮件失败，可稍后重试")
+                report_error(uid_context, "读取候选邮件失败，可稍后重试")
                 continue
             raw = next(
                 (item[1] for item in fetched or []
@@ -417,7 +451,7 @@ def fetch_qq_invoices(
             )
             if not raw:
                 result["failed"] += 1
-                result["errors"].append("候选邮件内容为空，可稍后重试")
+                report_error(uid_context, "候选邮件内容为空，可稍后重试")
                 continue
             msg = email.message_from_bytes(raw, policy=default)
             source = _message_source(msg, sources)
@@ -428,6 +462,7 @@ def fetch_qq_invoices(
                 if dt is not None and dt < start_dt:
                     continue
             count(source, "emails")
+            context = _message_error_context(msg, source, uid)
             if source != "jd":
                 attachment_count = 0
                 for filename, data in _pdf_attachments(msg):
@@ -436,10 +471,10 @@ def fetch_qq_invoices(
                     # A digest suffix avoids common attachment-name collisions.
                     attachment_stem = filename[:-4] if filename.lower().endswith(".pdf") else filename
                     stem = f"{MAIL_SOURCES[source]['name']}_{safe_filename(attachment_stem)[:120]}_{_sha256_bytes(data)[:12]}"
-                    save_candidate(source, stem, data)
+                    save_candidate(source, stem, data, context, filename=filename)
                 if not attachment_count:
                     count(source, "failed")
-                    result["errors"].append(f"{MAIL_SOURCES[source]['name']}邮件未找到 PDF 附件（暂不支持压缩包或下载页面）")
+                    report_error(context, "邮件未找到 PDF 附件（暂不支持压缩包或下载页面）")
                 continue
 
             subject = decode_mime_header(str(msg.get("Subject", "")))
@@ -465,10 +500,10 @@ def fetch_qq_invoices(
                     if progress:
                         progress(f"下载京东发票 {result['links']}...")
                     data, error = _download_pdf(url)
-                    save_candidate(source, stem, data, error)
+                    save_candidate(source, stem, data, context, error)
             if not link_index:
                 count(source, "failed")
-                result["errors"].append("京东邮件未找到发票 PDF 下载链接")
+                report_error(context, "京东邮件未找到发票 PDF 下载链接")
         return result
     finally:
         if mail is not None:

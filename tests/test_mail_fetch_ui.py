@@ -47,6 +47,11 @@ def fetch_case(tmp_path, monkeypatch):
         "skipped": 0,
         "failed": 0,
         "errors": [],
+        "sources": {
+            "jd": {"emails": 1, "links": 1, "attachments": 0, "downloaded": 1, "skipped": 0, "failed": 0},
+            "pinduoduo": {"emails": 1, "links": 0, "attachments": 1, "downloaded": 1, "skipped": 0, "failed": 0},
+            "alipay": {"emails": 1, "links": 0, "attachments": 1, "downloaded": 1, "skipped": 0, "failed": 0},
+        },
     }
     groups = [{"keep": "invoice.pdf", "remove": ["invoice-copy.pdf"]}]
     calls, settings, notices, sync_calls = [], [], [], []
@@ -70,8 +75,15 @@ def fetch_case(tmp_path, monkeypatch):
         showwarning=lambda title, message: notices.append(("warning", message)),
         showerror=lambda title, message: notices.append(("error", message)),
     ))
+    view = MailView()
+
+    def show_result(message, failed, duplicates):
+        notices.append(("warning" if failed else "info", message))
+        view.queue_duplicate_prompt(duplicates)
+
+    view.show_mail_fetch_result = show_result
     return SimpleNamespace(
-        view=MailView(), result=result, calls=calls, settings=settings,
+        view=view, result=result, calls=calls, settings=settings,
         notices=notices, sync_calls=sync_calls, groups=groups, folder=tmp_path,
     )
 
@@ -114,6 +126,7 @@ def test_success_updates_all_sources_cursor_and_reports_attachments(fetch_case):
     assert kind == "info"
     assert "2" in message and "附件" in message
     assert "1" in message and "链接" in message
+    assert all(name in message for name in ("京东", "拼多多", "支付宝发票管家"))
 
 
 def test_partial_failure_preserves_cursor_and_still_syncs_downloads(fetch_case):
@@ -128,7 +141,7 @@ def test_partial_failure_preserves_cursor_and_still_syncs_downloads(fetch_case):
     assert case.view.duplicate_prompts == [case.groups]
     assert case.notices[0][0] == "warning"
     assert "测试附件保存失败" in case.notices[0][1]
-    assert "没有推进" in case.notices[0][1]
+    assert "上次成功获取时间" in case.notices[0][1]
 
 
 def test_deferred_error_callback_survives_worker_exception_scope(fetch_case, monkeypatch):
@@ -201,6 +214,49 @@ class FakeWidget:
 
     def destroy(self):
         pass
+
+
+@pytest.mark.parametrize("dismiss", ["button", "escape", "close"])
+def test_result_dialog_keeps_full_details_and_prompts_duplicates_only_after_close(monkeypatch, dismiss):
+    from tests.test_duplicate_dialog import FakeWidget as ReportWidget, FakeWindow
+
+    window = FakeWindow()
+    texts, buttons, scrollbars = [], [], []
+
+    def collect(target, *args, **kwargs):
+        widget = ReportWidget(*args, **kwargs)
+        target.append(widget)
+        return widget
+
+    monkeypatch.setattr(app, "tk", SimpleNamespace(
+        Toplevel=lambda *args: window,
+        Text=lambda *args, **kwargs: collect(texts, *args, **kwargs),
+    ))
+    monkeypatch.setattr(app, "ttk", SimpleNamespace(
+        Frame=ReportWidget, Label=ReportWidget,
+        Scrollbar=lambda *args, **kwargs: collect(scrollbars, *args, **kwargs),
+        Button=lambda *args, **kwargs: collect(buttons, *args, **kwargs),
+    ))
+    view = MailView()
+    duplicates = [{"remove": ["synthetic-copy.pdf"]}]
+    report = "\n".join(f"合成失败详情 {i}" for i in range(50))
+
+    app.InvoiceApp.show_mail_fetch_result(view, report, True, duplicates)
+
+    assert view.duplicate_prompts == []
+    assert texts[0].text == [report]
+    assert texts[0].options["state"] == "disabled"
+    assert scrollbars[0].options["command"] == texts[0].yview
+    if dismiss == "button":
+        buttons[0].options["command"]()
+    elif dismiss == "escape":
+        window.bindings["<Escape>"](None)
+    else:
+        window.protocols["WM_DELETE_WINDOW"]()
+    assert window.destroyed
+    assert view.duplicate_prompts == [duplicates]
+    window.protocols["WM_DELETE_WINDOW"]()
+    assert view.duplicate_prompts == [duplicates]
 
 
 def test_upgrading_from_jd_only_defaults_to_all_history(monkeypatch):

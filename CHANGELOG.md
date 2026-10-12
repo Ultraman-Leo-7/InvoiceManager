@@ -4,6 +4,19 @@ All notable changes to InvoiceManager will be documented here.
 
 ## Unreleased
 
+## v5.2.17
+
+### Added
+
+- Show update download percentage, downloaded/total size, and recent transfer speed in Settings and the main status bar
+- Report checksum-download, verification and restart stages separately; show an unknown total honestly when no file size is available
+- Break down QQ invoice-fetch results by JD, Pinduoduo and Alipay invoice manager, including mail, downloaded, duplicate-skipped and failed counts
+- Show all mail-fetch failures in a scrollable result window with readable mail subject/date/UID context and a clear explanation of retry checkpoints
+
+### Fixed
+
+- Ignore repeated update actions while an update check or download is already running, preventing concurrent writes to the same update file
+
 ## v5.2.16
 
 ### Fixed
