@@ -1,6 +1,7 @@
 """Synthetic-only tests for supported invoice email templates and file safety."""
 
 import hashlib
+import io
 import os
 from datetime import datetime, timedelta, timezone
 from email.header import Header
@@ -414,3 +415,77 @@ def test_repeated_jd_link_downloads_only_once(tmp_path, mailbox, monkeypatch):
     result = fetch(tmp_path)
     assert (result["emails"], result["links"], result["downloaded"], result["failed"]) == (2, 1, 1, 0)
     assert urls == [JD_URL]
+
+
+@pytest.mark.parametrize("label", ["发票PDF文件下载", "发票文件下载"])
+def test_jd_old_and_new_template_download_and_rescan_skip_same_content(tmp_path, mailbox, monkeypatch, label):
+    msg = invoice_message("jd")
+    msg.get_payload()[1].set_content(
+        f'<a href="{JD_URL}">{label}</a>', subtype="html",
+    )
+    mailbox([msg])
+    downloads = []
+
+    def download(url):
+        downloads.append(url)
+        return PDF_A, ""
+
+    monkeypatch.setattr(jd_qq, "_download_pdf", download)
+    first = fetch(tmp_path)
+    assert (first["links"], first["downloaded"], first["skipped"], first["failed"]) == (1, 1, 0, 0)
+    saved_path = next(tmp_path.glob("*.pdf"))
+    renamed = saved_path.with_name("用户重新命名.pdf")
+    saved_path.rename(renamed)
+    second = fetch(tmp_path, start_time="2020-01-01")
+    assert (second["links"], second["downloaded"], second["skipped"], second["failed"]) == (1, 0, 1, 0)
+    assert downloads == [JD_URL, JD_URL]
+    assert list(tmp_path.iterdir()) == [renamed]
+    assert renamed.read_bytes() == PDF_A
+
+
+@pytest.mark.parametrize("body, content_type", [
+    (b"<?xml version='1.0'?><invoice/>", "application/xml"),
+    (b"<html>invoice download expired</html>", "text/html"),
+])
+def test_jd_generic_download_entry_rejects_actual_non_pdf_response(tmp_path, mailbox, monkeypatch, body, content_type):
+    msg = invoice_message("jd")
+    msg.get_payload()[1].set_content(
+        f'<a href="{JD_URL}">发票文件下载</a>', subtype="html",
+    )
+    # Exercise the real downloader rather than the mailbox fixture's shortcut.
+    real_download = jd_qq._download_pdf
+    mailbox([msg])
+    monkeypatch.setattr(jd_qq, "_download_pdf", real_download)
+    requested_urls = []
+
+    class Response(io.BytesIO):
+        headers = {"Content-Type": content_type}
+
+        def geturl(self):
+            return JD_URL
+
+    def urlopen(request, timeout):
+        requested_urls.append(request.full_url)
+        return Response(body)
+
+    monkeypatch.setattr(jd_qq.urllib.request, "urlopen", urlopen)
+    result = fetch(tmp_path)
+    assert requested_urls == [JD_URL]
+    assert (result["links"], result["downloaded"], result["failed"]) == (1, 0, 1)
+    assert "返回内容不是 PDF" in result["errors"][0]
+    assert result["sources"]["jd"]["failed"] == 1
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_pdf_without_invoice_amount_is_saved_for_later_review(tmp_path, mailbox, monkeypatch):
+    import fitz
+
+    with fitz.open() as document:
+        page = document.new_page()
+        page.insert_text((72, 72), "Synthetic document without an amount")
+        pdf = document.tobytes()
+    mailbox([invoice_message("jd")])
+    monkeypatch.setattr(jd_qq, "_download_pdf", lambda url: (pdf, ""))
+    result = fetch(tmp_path)
+    assert (result["downloaded"], result["failed"]) == (1, 0)
+    assert next(tmp_path.glob("*.pdf")).read_bytes() == pdf

@@ -4,6 +4,18 @@ All notable changes to InvoiceManager will be documented here.
 
 ## Unreleased
 
+## v5.2.18
+
+### Fixed
+
+- Recognize JD's “发票文件下载” links as well as PDF-labelled invoice links, instead of requiring one exact anchor phrase
+- Combine invoice/download hints from link text, title, accessible labels and image text; support explicit invoice PDF paths for generic download buttons
+- Normalize whitespace, split HTML text, case and full-width characters while excluding explicit XML/OFD/archive links and unrelated actions
+
+### Improved
+
+- Explain that PDF-header validation is not invoice authentication and that files without an extracted amount remain available for manual review
+
 ## v5.2.17
 
 ### Added

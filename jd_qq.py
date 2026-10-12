@@ -25,7 +25,6 @@ IMAP_HOST = "imap.qq.com"
 IMAP_PORT = 993
 JD_SENDER = "customer_service@jd.com"
 SUBJECT_KEYWORD = "电子发票已开具"
-PDF_LINK_TEXT = "发票PDF文件下载"
 
 MAIL_SOURCES = {
     "jd": {"name": "京东", "sender": JD_SENDER, "subject": SUBJECT_KEYWORD},
@@ -60,6 +59,36 @@ def normalize_href(href: str) -> str:
     return href
 
 
+def _link_text(value: str) -> str:
+    value = unicodedata.normalize("NFKC", value).casefold()
+    return "".join(char for char in value if not char.isspace() and unicodedata.category(char) != "Cf")
+
+
+def _is_invoice_download_link(label: str, url: str) -> bool:
+    """Combine invoice/action hints; the downloaded bytes must still pass the PDF check."""
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        if parsed.scheme.lower() not in ("http", "https") or not parsed.hostname:
+            return False
+    except ValueError:
+        return False
+    label = _link_text(label)
+    path = urllib.parse.unquote(parsed.path).casefold()
+    other_formats = ("xml", "ofd", "zip", "rar", "7z", "xlsx", "xls", "csv")
+    if any(kind in label or path.endswith("." + kind) for kind in other_formats):
+        return False
+    if any(word in label for word in ("退订", "unsubscribe", "广告", "帮助", "说明书", "操作指南")):
+        return False
+    has_invoice = any(word in label for word in ("发票", "invoice", "fapiao"))
+    has_action = any(word in label for word in ("下载", "获取", "download"))
+    if has_invoice and has_action:
+        return True
+    # Generic download buttons need an explicit invoice PDF path, not just any PDF URL.
+    return has_action and path.endswith(".pdf") and any(
+        word in path for word in ("invoice", "fapiao", "发票")
+    )
+
+
 class InvoiceLinkParser(HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
@@ -73,8 +102,10 @@ class InvoiceLinkParser(HTMLParser):
         if tag.lower() == "a" and self.current_href is None:
             attr = dict(attrs)
             self.current_href = attr.get("href")
-            self.current_anchor_text = []
+            self.current_anchor_text = [attr.get("title", "") or "", attr.get("aria-label", "") or ""]
             self.current_context = "".join(self.all_text)[-600:]
+        elif tag.lower() == "img" and self.current_href is not None:
+            self.current_anchor_text.append(dict(attrs).get("alt", "") or "")
 
     def handle_data(self, data):
         self.all_text.append(data)
@@ -84,10 +115,11 @@ class InvoiceLinkParser(HTMLParser):
     def handle_endtag(self, tag):
         if tag.lower() == "a" and self.current_href is not None:
             anchor_text = "".join(self.current_anchor_text)
-            if PDF_LINK_TEXT in re.sub(r"\s+", "", anchor_text):
+            url = normalize_href(self.current_href)
+            if _is_invoice_download_link(anchor_text, url):
                 self.links.append(
                     {
-                        "url": normalize_href(self.current_href),
+                        "url": url,
                         "context": self.current_context,
                     }
                 )
