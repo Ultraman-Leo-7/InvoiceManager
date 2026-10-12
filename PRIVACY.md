@@ -21,12 +21,14 @@ InvoiceManager does not include analytics, advertising SDKs, telemetry, or an In
 
 Network access happens only when the user uses a feature that needs it.
 
-### QQ Mail / JD invoice retrieval
+### QQ Mail invoice retrieval
 
 May connect to:
 
-- QQ Mail IMAP (`imap.qq.com`) to read matching invoice emails
+- QQ Mail IMAP (`imap.qq.com`) to read matching JD, Pinduoduo and Alipay invoice-manager export emails and their PDF attachments, with the inbox opened read-only
 - JD-hosted PDF download URLs extracted from those emails
+
+Pinduoduo and Alipay support reads PDF attachments already delivered to the configured QQ mailbox. It does not log in to Pinduoduo or Alipay or connect to a personal invoice-wallet API. Invoice attachments are saved locally and are not uploaded by this feature.
 
 ### Nutstore backup / restore
 

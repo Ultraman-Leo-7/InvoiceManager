@@ -44,7 +44,7 @@ from invoice_extract import (
     parse_invoice,
     sha256_file,
 )
-from jd_qq import fetch_jd_invoices
+from jd_qq import fetch_qq_invoices
 from purchase_tracker import (
     add_purchase,
     clear_manual_match,
@@ -525,7 +525,7 @@ class InvoiceApp(tk.Tk):
 
         actions = ttk.Frame(self, padding=(12, 0, 12, 8))
         actions.pack(fill="x")
-        ttk.Button(actions, text="从QQ邮箱获取京东发票", command=self.open_jd_fetch_dialog).pack(side="left")
+        ttk.Button(actions, text="从QQ邮箱获取发票", command=self.open_qq_fetch_dialog).pack(side="left")
 
         more_button = ttk.Menubutton(actions, text="更多")
         more_menu = tk.Menu(more_button, tearoff=False)
@@ -1517,11 +1517,11 @@ class InvoiceApp(tk.Tk):
 
         # ---- 邮箱与发票 ----
         mail = pages["mail"]
-        email_box = ttk.LabelFrame(mail, text="QQ 邮箱 · 京东电子发票", padding=12)
+        email_box = ttk.LabelFrame(mail, text="QQ 邮箱 · 电子发票", padding=12)
         email_box.pack(fill="x")
         ttk.Label(
             email_box,
-            text="用于从 QQ 邮箱收件箱获取京东电子发票。这里需要 QQ 邮箱生成的 16 位授权码，不是 QQ 登录密码。",
+            text="从 QQ 邮箱收件箱获取京东、拼多多及支付宝发票管家导出的发票。这里需要 QQ 邮箱生成的 16 位授权码，不是 QQ 登录密码。",
             wraplength=640,
         ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
         ttk.Label(email_box, text="QQ 邮箱").grid(row=1, column=0, sticky="w", pady=4)
@@ -1846,7 +1846,7 @@ class InvoiceApp(tk.Tk):
         ttk.Button(bottom, text="关闭", command=win.destroy).pack(side="right")
         ttk.Button(bottom, text="保存设置", command=save_all).pack(side="right", padx=(0, 8))
 
-    def open_jd_fetch_dialog(self):
+    def open_qq_fetch_dialog(self):
         email_addr = get_setting("qq_email", "").strip()
         enc = get_setting("qq_auth_code", "").strip()
         if not email_addr or not enc:
@@ -1866,14 +1866,16 @@ class InvoiceApp(tk.Tk):
             return
 
         win = tk.Toplevel(self)
-        win.title("从QQ邮箱获取京东发票")
+        win.title("从QQ邮箱获取发票")
         win.transient(self)
         win.grab_set()
-        win.geometry("560x360")
+        win.geometry("600x400")
         outer = ttk.Frame(win, padding=14)
         outer.pack(fill="both", expand=True)
         ttk.Label(outer, text=f"邮箱：{email_addr}").pack(anchor="w")
-        last = get_setting("jd_last_fetch", "")
+        ttk.Label(outer, text="支持京东、拼多多、支付宝发票管家导出邮件。").pack(anchor="w", pady=(4, 0))
+        # A JD-only cursor cannot cover the newly supported historical mail.
+        last = get_setting("qq_invoice_last_fetch", "")
         last_text = last.replace("T", " ")[:16] if last else "尚未成功获取过"
         ttk.Label(outer, text=f"上次成功获取：{last_text}").pack(anchor="w", pady=(4, 12))
         mode_var = tk.StringVar(value="last" if last else "all")
@@ -1899,30 +1901,30 @@ class InvoiceApp(tk.Tk):
             mode = mode_var.get()
             start_time = last if mode == "last" else custom_var.get().strip() if mode == "custom" else None
             win.destroy()
-            self.run_jd_fetch(email_addr, auth_code, start_time)
+            self.run_qq_fetch(email_addr, auth_code, start_time)
 
         ttk.Button(buttons, text="开始获取", command=start).pack(side="right")
         ttk.Button(buttons, text="取消", command=win.destroy).pack(side="right", padx=(0, 6))
 
-    def run_jd_fetch(self, email_addr, auth_code, start_time):
+    def run_qq_fetch(self, email_addr, auth_code, start_time):
         def worker():
             started = datetime.now()
             try:
                 self.set_status("正在连接 QQ 邮箱...")
-                result = fetch_jd_invoices(
+                result = fetch_qq_invoices(
                     email_addr=email_addr,
                     auth_code=auth_code,
                     output_dir=BASE_DIR,
                     start_time=start_time,
                     progress=self.set_status,
                 )
-                if result["failed"] == 0:
-                    set_setting("jd_last_fetch", started.isoformat(timespec="seconds"))
                 stats = sync_folder(progress=self.set_status)
                 self._last_folder_signature = folder_signature()
+                if result["failed"] == 0:
+                    set_setting("qq_invoice_last_fetch", started.isoformat(timespec="seconds"))
                 self.after(0, self.refresh_all)
                 msg = (
-                    f"邮箱扫描 {result['emails']} 封，发现 {result['links']} 个 PDF 链接。\n"
+                    f"发票邮件 {result['emails']} 封，发现 {result.get('attachments', 0)} 个 PDF 附件、{result['links']} 个下载链接。\n"
                     f"新下载 {result['downloaded']}，已存在 {result['skipped']}，失败 {result['failed']}。\n"
                     f"待处理重复 {sum(len(group['remove']) for group in stats['duplicates'])} 个。\n"
                     f"当前文件夹共 {stats['total']} 个 PDF。"
@@ -1947,12 +1949,10 @@ class InvoiceApp(tk.Tk):
             except Exception as e:
                 detail = traceback.format_exc()
                 self.set_status("邮箱获取失败")
+                error_message = f"邮箱获取失败：{type(e).__name__}: {e}\n\n" + detail[-1800:]
                 self.after(
                     0,
-                    lambda: messagebox.showerror(
-                        APP_TITLE,
-                        f"邮箱获取失败：{type(e).__name__}: {e}\n\n" + detail[-1800:],
-                    ),
+                    lambda msg=error_message: messagebox.showerror(APP_TITLE, msg),
                 )
 
         threading.Thread(target=worker, daemon=True).start()
