@@ -74,12 +74,19 @@ def _verified_hash(path: Path, expected: str) -> tuple:
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(path, flags)
     with os.fdopen(descriptor, "rb") as source:
-        if _file_signature(os.fstat(source.fileno())) != signature:
+        opened_signature = _file_signature(os.fstat(source.fileno()))
+        # Windows may report creation time from lstat(), but metadata-change
+        # time from fstat(). Compare shared fields across APIs, then check each
+        # full signature (including ctime) against its own stable baseline.
+        if (
+            opened_signature[:-1] != signature[:-1]
+            or _file_signature(_regular_file_stat(path)) != signature
+        ):
             raise ValueError("文件在检查时已发生变化，请重新扫描")
         digest = hashlib.sha256()
         for block in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(block)
-        if _file_signature(os.fstat(source.fileno())) != signature:
+        if _file_signature(os.fstat(source.fileno())) != opened_signature:
             raise ValueError("文件在读取时已发生变化，请重新扫描")
     if _file_signature(_regular_file_stat(path)) != signature:
         raise ValueError("文件在检查时已被替换，请重新扫描")

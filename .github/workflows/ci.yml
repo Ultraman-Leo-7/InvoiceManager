@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - "app.py"
+      - "version.py"
       - "invoice_extract.py"
       - "jd_qq.py"
       - "purchase_tracker.py"
@@ -17,6 +18,7 @@ on:
       - "tools/**"
       - "assets/**"
       - ".github/workflows/ci.yml"
+      - ".github/workflows/release.yml"
   pull_request:
     branches: [main]
   workflow_dispatch:

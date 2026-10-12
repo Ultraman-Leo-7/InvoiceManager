@@ -617,11 +617,13 @@ import 检查
 pytest 单元测试
 ```
 
-正式发布 exe 时手动运行 `Build Windows Release` 工作流，版本号按简单递增规则填写，例如：
+正式发布时，更新 `version.py` 的 `APP_VERSION`，并在 `CHANGELOG.md` 添加对应版本说明。版本号变更合入 `main` 后，`Build Windows Release` 会自动测试、打包并发布 exe；仅创建 PR 或提交未升版本的代码不会发布软件包。
+
+仍可手动运行 `Build Windows Release` 补发未成功发布的版本。版本输入留空时读取 `version.py`；若填写，必须与程序版本一致。已发布的版本不覆盖，后续更新需递增版本号，例如：
 
 ```text
-v5.2.9
-v5.2.10
+v5.2.14
+v5.2.15
 v5.3.0
 ```
 

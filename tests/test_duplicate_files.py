@@ -1,5 +1,6 @@
 import hashlib
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -47,6 +48,64 @@ def test_cleanup_leaves_one_copy_and_preserves_unlisted_files(tmp_path):
     assert result == {"deleted": ["a.pdf", "c.PDF"], "errors": []}
     assert sorted(path.name for path in tmp_path.iterdir()) == ["b.pdf", "different.pdf", "unlisted.pdf"]
     assert (tmp_path / "b.pdf").read_bytes() == b"same invoice"
+
+
+def changed_stat(info, **changes):
+    fields = ("st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns", "st_ctime_ns")
+    return SimpleNamespace(**({field: getattr(info, field) for field in fields} | changes))
+
+
+@pytest.mark.parametrize("operation", [cleanup_duplicate_files, rename_duplicate_files])
+def test_duplicate_operations_accept_different_path_and_descriptor_ctime(tmp_path, monkeypatch, operation):
+    digest = make_copies(tmp_path, ["original.pdf", "copy.pdf"])
+    original_fstat = duplicate_files.os.fstat
+
+    def windows_style_fstat(descriptor):
+        info = original_fstat(descriptor)
+        return changed_stat(info, st_ctime_ns=info.st_ctime_ns + 1_000_000)
+
+    monkeypatch.setattr(duplicate_files.os, "fstat", windows_style_fstat)
+    result = operation(tmp_path, [{"digest": digest, "keep": "original.pdf", "remove": ["copy.pdf"]}])
+
+    assert result["errors"] == []
+    assert (tmp_path / "original.pdf").read_bytes() == b"same invoice"
+    assert not (tmp_path / "copy.pdf").exists()
+    if operation is rename_duplicate_files:
+        assert (tmp_path / "哈希副本-copy.pdf").read_bytes() == b"same invoice"
+    else:
+        assert result["deleted"] == ["copy.pdf"]
+
+
+def test_descriptor_ctime_change_during_read_is_still_rejected(tmp_path, monkeypatch):
+    digest = make_copies(tmp_path, ["original.pdf"])
+    original_fstat = duplicate_files.os.fstat
+    calls = 0
+
+    def changing_fstat(descriptor):
+        nonlocal calls
+        calls += 1
+        info = original_fstat(descriptor)
+        return changed_stat(info, st_ctime_ns=info.st_ctime_ns + calls * 1_000_000)
+
+    monkeypatch.setattr(duplicate_files.os, "fstat", changing_fstat)
+    with pytest.raises(ValueError, match="文件在读取时已发生变化"):
+        duplicate_files._verified_hash(tmp_path / "original.pdf", digest)
+
+
+def test_path_ctime_change_before_read_is_still_rejected(tmp_path, monkeypatch):
+    digest = make_copies(tmp_path, ["original.pdf"])
+    original_stat = duplicate_files._regular_file_stat
+    calls = 0
+
+    def changing_stat(path):
+        nonlocal calls
+        calls += 1
+        info = original_stat(path)
+        return changed_stat(info, st_ctime_ns=info.st_ctime_ns + (calls - 1) * 1_000_000)
+
+    monkeypatch.setattr(duplicate_files, "_regular_file_stat", changing_stat)
+    with pytest.raises(ValueError, match="文件在检查时已发生变化"):
+        duplicate_files._verified_hash(tmp_path / "original.pdf", digest)
 
 
 def test_arrival_order_retains_oldest_copy_unless_existing_database_name_is_present():

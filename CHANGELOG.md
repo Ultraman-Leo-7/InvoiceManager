@@ -4,6 +4,8 @@ All notable changes to InvoiceManager will be documented here.
 
 ## Unreleased
 
+## v5.2.14
+
 ### Added
 
 - Detect identical PDF copies during folder scans and show a scrollable confirmation dialog; scanning alone never deletes or renames files
@@ -18,6 +20,12 @@ All notable changes to InvoiceManager will be documented here.
 - Preserve notes, confirmation state and manual purchase associations after either choice, and immediately reconcile the database with remaining files
 - Serialize folder scans and duplicate operations; offer confirmation after startup, polling, manual refresh and email downloads
 - Distinguish PDF file count from unique invoice record count and pending duplicate count
+- Automatically build and publish a Windows release when a version.py update reaches main; keep manual release runs available and require the release tag to match the executable version
+- Use the version's CHANGELOG entry for GitHub release notes
+
+### Fixed
+
+- Handle differing Windows path-stat and file-descriptor ctime values without incorrectly rejecting unchanged duplicate files; retain identity, content and concurrent-change checks
 
 ## v5.2.13
 
