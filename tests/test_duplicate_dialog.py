@@ -114,14 +114,16 @@ def dialog_case(tmp_path, monkeypatch):
         "提取状态": "正常",
     })
     app.init_db()
-    original = tmp_path / "original.pdf"
+    folder = tmp_path / "发票"
+    folder.mkdir(exist_ok=True)
+    original = folder / "original.pdf"
     with fitz.open() as document:
         page = document.new_page()
         page.insert_text((72, 72), "Test invoice")
         document.save(original)
     content = original.read_bytes()
     app.sync_folder()
-    copy = tmp_path / "copy.pdf"
+    copy = folder / "copy.pdf"
     copy.write_bytes(content)
     groups = app.sync_folder()["duplicates"]
     windows, buttons, choices = [], [], []
@@ -148,7 +150,7 @@ def dialog_case(tmp_path, monkeypatch):
 
     monkeypatch.setattr(app, "handle_duplicate_files", track_choice)
     return SimpleNamespace(
-        folder=tmp_path, original=original, copy=copy, content=content,
+        folder=folder, original=original, copy=copy, content=content,
         groups=groups, windows=windows, buttons=buttons, choices=choices,
         view=HeadlessInvoiceView(),
     )

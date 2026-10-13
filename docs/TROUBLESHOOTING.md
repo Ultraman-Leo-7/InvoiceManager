@@ -14,23 +14,26 @@ Recommended checks:
 
 ## Where should I put the exe?
 
-InvoiceManager treats the folder containing the executable as the active invoice folder.
+InvoiceManager treats the folder containing the executable as its working root. Use a dedicated folder: incoming files placed next to the exe are automatically filed.
 
 Recommended structure:
 
 ```text
 MyInvoices/
 ├─ InvoiceManager-Windows-x64.exe
-├─ invoice-1.pdf
-├─ invoice-2.pdf
-└─ ...
+├─ .invoice_manager.db
+├─ 发票/
+│  ├─ invoice-1.pdf
+│  └─ invoice-2.pdf
+└─ 异常/
+   └─ files-to-review
 ```
 
-If you move the exe into another folder, that new folder becomes the active invoice folder.
+If you move only the exe into another folder, that new folder becomes the working root and uses its own database. To retain all data, move the entire working folder.
 
 ## A new PDF does not appear immediately
 
-InvoiceManager checks the current folder for PDF changes about every **2 seconds**.
+InvoiceManager checks incoming root files and the `发票/` folder about every **2 seconds**.
 
 You can also click **刷新发票文件夹** to force an immediate scan.
 
@@ -39,12 +42,19 @@ If the PDF still does not appear, check that:
 - The file extension is `.pdf`.
 - The file has finished copying/downloading.
 - The program is running from the folder you think it is.
+- It has a readable invoice number and total amount. Otherwise, open `异常/` using the exception-count control.
+
+## Why did my file move to 异常?
+
+From v5.2.21, PDFs with both an invoice number and a finite total amount go to `发票/`; zero and negative amounts are accepted. Other input formats, missing-number/missing-amount PDFs and unreadable PDFs are preserved in `异常/` and excluded from the active invoice list. The application, database, backups and export files stay in place.
+
+Files in `异常/` are counted but not repeatedly re-parsed. Inspect or repair a file, then move it back next to the exe to retry. A ZIP placed manually in the root also goes to `异常/`; archive reading is provided for supported mailbox attachments, not as a general local ZIP importer.
 
 ## A PDF appears but some invoice fields are missing
 
 InvoiceManager currently parses PDF text layers; it is not a general OCR engine.
 
-If a PDF is essentially a scanned image without readable text, extraction may be incomplete or fail. Check the **提取状态** column and review the invoice manually.
+If a PDF is essentially a scanned image without readable text, extraction may be incomplete or fail, and the file goes to `异常/` when its invoice number or amount cannot be read. Missing optional fields do not prevent filing; check the **提取状态** column for those warnings.
 
 ## The QQ Mail authorization-code box is blank after saving
 
@@ -91,6 +101,12 @@ means that exact local date and minute.
 JD controls the final download endpoint. If JD changes its email or download-link behavior, the current parser may need an update.
 
 When reporting this problem, do not post the real invoice URL publicly if it contains account-specific information. Provide the error text and a redacted description instead.
+
+## Alipay invoice manager exported multiple invoices as ZIP
+
+From v5.2.21, supported Alipay and Pinduoduo email attachments can be PDFs or ZIP files containing PDFs. The application reads each PDF member, deduplicates it against local PDFs, then files it into `发票/` or `异常/`. XML and other non-PDF members are ignored and the ZIP itself is not saved.
+
+Encrypted, damaged or oversized archives and unreadable PDF members appear in failure details. A matching email with no usable PDF is still a failure. The downloaded count includes PDFs later filed into `异常/`; it is not a count of invoices that passed field extraction.
 
 ## A purchase has shipping, but InvoiceManager does not look for item price + shipping as one invoice
 
@@ -150,7 +166,7 @@ The database file is:
 .invoice_manager.db
 ```
 
-in the same invoice folder as the executable.
+in the working root next to the executable, outside `发票/` and `异常/`. Upgrading to the automatic filing layout keeps this location unchanged.
 
 On Windows, InvoiceManager attempts to mark it as a hidden file so it does not clutter the folder.
 

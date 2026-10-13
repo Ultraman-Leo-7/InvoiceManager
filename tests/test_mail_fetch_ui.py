@@ -102,6 +102,7 @@ def test_unified_worker_passes_credentials_and_folder_to_mail_fetcher(fetch_case
         "email_addr": "test@example.com",
         "auth_code": "fake-auth-code",
         "output_dir": case.folder,
+        "dedupe_dirs": [case.folder / "发票", case.folder / "异常"],
         "start_time": None,
         "progress": case.view.set_status,
     }
@@ -431,3 +432,28 @@ def test_upgrading_from_jd_only_defaults_to_all_history(monkeypatch):
     assert "qq_invoice_last_fetch" in read_keys
     assert "jd_last_fetch" not in read_keys
     assert fetch_calls == [("test@example.com", "fake-auth-code", None)]
+
+
+@pytest.mark.parametrize("kind", ["filing-error", "changing-file"])
+def test_filing_error_or_deferred_file_keeps_mail_cursor_and_retries_scan(fetch_case, monkeypatch, kind):
+    case = fetch_case
+    stats = {
+        "total": 3,
+        "abnormal_count": 0,
+        "duplicates": [],
+        "failed": 1 if kind == "filing-error" else 0,
+        "filing_errors": ["合成文件整理错误"] if kind == "filing-error" else [],
+        "deferred_paths": [case.folder / "changing.pdf"],
+    }
+    monkeypatch.setattr(app, "sync_folder", lambda **kwargs: stats)
+
+    run_fetch(case)
+    case.view.finish_callbacks()
+
+    assert case.settings == []
+    assert case.view._last_folder_signature is None
+    assert case.view.refreshed == 1
+    assert case.notices[0][0] == "warning"
+    assert "上次成功获取时间" in case.notices[0][1]
+    if kind == "filing-error":
+        assert "合成文件整理错误" in case.notices[0][1]

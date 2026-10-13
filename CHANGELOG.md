@@ -4,6 +4,21 @@ All notable changes to InvoiceManager will be documented here.
 
 ## Unreleased
 
+## v5.2.21
+
+### Added
+
+- Read PDF members from Alipay invoice-manager and Pinduoduo ZIP email attachments, including members stored in subfolders; deduplicate each PDF and report archive/member failures without saving unrelated archive contents
+- Automatically file incoming root-level documents into `发票/` when invoice number and finite total amount can be parsed, or preserve them in `异常/` otherwise; zero and negative totals remain valid
+- Show the exception-file count and provide a direct way to open `异常/`; move repaired files back to the root to retry
+
+### Improved
+
+- Migrate existing root-level PDFs through the same filing rules while preserving the database location and hash-based notes, manual confirmation and purchase associations
+- Keep application, database, backup and export files in place; preserve source files on filing errors and avoid overwriting same-name files
+- Deduplicate mailbox PDFs against the root, `发票/` and `异常/`, while retaining confirmation before deletion of local duplicates
+- Document the new folder layout and clarify that database backups still exclude original invoice and exception files
+
 ## v5.2.20
 
 ### Fixed
