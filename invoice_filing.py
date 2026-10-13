@@ -67,7 +67,7 @@ def _protected_root_file(path: Path, protected: set[str]) -> bool:
     if name.startswith((".invoice_manager", ".invoice-", "~$")):
         return True
     if name in {
-        "settings.json", "sha256sums.txt", "发票汇总.xlsx", "latest.db",
+        "settings.json", "sha256sums.txt", "sha256sums.txt.update", "发票汇总.xlsx", "latest.db",
         "license", "makefile", "pyproject.toml", "pytest.ini", "setup.cfg",
         "requirements.txt", "requirements-dev.txt", "desktop.ini", "thumbs.db",
     }:
