@@ -15,8 +15,10 @@ def format_mail_fetch_report(result: dict, stats: dict) -> str:
         f"共识别发票邮件 {result.get('emails', 0)} 封；"
         f"PDF 附件 {result.get('attachments', 0)} 份；ZIP 附件 {result.get('archives', 0)} 个；"
         f"下载链接 {result.get('links', 0)} 个。",
-        "",
     ]
+    if result.get("merged_ignored", 0):
+        lines.append(f"已忽略被单张原票完整覆盖的合并 PDF {result['merged_ignored']} 份（不计入内容相同跳过数）。")
+    lines.append("")
     source_failures = 0
     for key, name in (("jd", "京东"), ("pinduoduo", "拼多多"), ("alipay", "支付宝发票管家")):
         counts = sources.get(key, {})
@@ -27,6 +29,8 @@ def format_mail_fetch_report(result: dict, stats: dict) -> str:
             f"重复跳过 {counts.get('skipped', 0)} 份，失败 {counts.get('failed', 0)} 项。"
             f"ZIP 附件 {counts.get('archives', 0)} 个。"
         )
+        if counts.get("merged_ignored", 0):
+            lines[-1] += f"已忽略被单张原票完整覆盖的合并 PDF {counts['merged_ignored']} 份。"
     unknown_failures = failed - source_failures
     if unknown_failures > 0:
         lines.append(f"未能识别来源的候选邮件：失败 {unknown_failures} 项。")
@@ -34,7 +38,8 @@ def format_mail_fetch_report(result: dict, stats: dict) -> str:
     lines.extend([
         "",
         "邮件数不等于 PDF 数：一封邮件可含多份发票，也可能未识别到 PDF。",
-        "PDF 附件数包含 ZIP 内的 PDF；新下载数不等于有效归档数，识别异常的 PDF 会保留到“异常”。",
+        "PDF 附件数包含 ZIP 内的 PDF，不包含被忽略的合并副本。",
+        "新下载数不等于有效归档数，识别异常的 PDF 会保留到“异常”。",
         f"当前“发票”文件夹共 {stats.get('total', 0)} 个有效 PDF；待处理重复 {pending_duplicates} 个；"
         f"“异常”共 {stats.get('abnormal_count', 0)} 个文件。",
     ])
@@ -65,4 +70,6 @@ def format_mail_fetch_report(result: dict, stats: dict) -> str:
             lines.append("扫描期间文件发生变化，程序会自动重新扫描；本次邮箱获取可稍后重试。")
     if not failed and not has_filing_issues:
         lines.extend(["", "获取完成，已更新“上次成功获取时间”。"])
+    if result.get("history_rescan_pending", False):
+        lines.extend(["", "仍需扫描全部历史收件箱，补齐旧版漏读的嵌套发票；已有 PDF 按哈希跳过。"])
     return "\n".join(lines)

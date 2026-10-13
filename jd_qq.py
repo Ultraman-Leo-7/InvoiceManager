@@ -33,6 +33,7 @@ MAX_ZIP_BYTES = 50 * 1024 * 1024
 MAX_ZIP_ENTRIES = 2000
 MAX_ZIP_PDF_BYTES = 50 * 1024 * 1024
 MAX_ZIP_TOTAL_BYTES = 200 * 1024 * 1024
+MAX_ZIP_DEPTH = 4
 
 MAIL_SOURCES = {
     "jd": {"name": "京东", "sender": JD_SENDER, "subject": SUBJECT_KEYWORD},
@@ -418,59 +419,115 @@ def _zip_pdf_attachments(data):
     An empty name with no error means a readable archive containing no PDFs;
     the caller decides whether the complete email has any supported PDF.
 
-    Never extract members to disk: member paths are labels only. Budget both
-    declared and actual reads, and keep other usable members after a bad member.
+    Never extract members to disk: member paths are labels only. Entry and
+    decompression budgets cover the complete archive tree, including inner ZIP
+    payloads. MAX_ZIP_DEPTH includes the outer mail attachment as the first level.
     """
-    if len(data) > MAX_ZIP_BYTES:
-        yield "", None, f"ZIP 压缩包超过大小限制（{MAX_ZIP_BYTES // 1024 // 1024} MiB）"
-        return
-    try:
-        archive = zipfile.ZipFile(io.BytesIO(data))
-    except (zipfile.BadZipFile, OSError, ValueError, NotImplementedError) as exc:
-        yield "", None, f"无法读取 ZIP 压缩包，文件可能已损坏或格式不受支持：{type(exc).__name__}"
-        return
-    with archive:
-        entries = archive.infolist()
-        if len(entries) > MAX_ZIP_ENTRIES:
-            yield "", None, f"ZIP 条目数超过限制（{MAX_ZIP_ENTRIES} 项）"
+    state = {"entries": 0, "read_budget": 0, "pdf_candidates": 0, "errors": 0}
+
+    def archive_error(path, error):
+        state["errors"] += 1
+        return "", None, (f"内层压缩包：{_diagnostic_text(path, 160)}｜{error}" if path else error)
+
+    def visit(payload, prefix, depth):
+        if len(payload) > MAX_ZIP_BYTES:
+            yield archive_error(prefix, f"ZIP 压缩包超过大小限制（{MAX_ZIP_BYTES // 1024 // 1024} MiB）")
             return
-        candidates = 0
-        read_budget = 0
-        for info in entries:
-            name = _zip_member_name(info)
-            if info.is_dir() or not name.lower().endswith(".pdf"):
-                continue
-            candidates += 1
-            if stat.S_ISLNK(info.external_attr >> 16):
-                yield name, None, "ZIP 中的 PDF 条目是符号链接，已拒绝读取"
-                continue
-            if info.flag_bits & 1:
-                yield name, None, "ZIP 中的 PDF 已加密，暂不支持密码解压"
-                continue
-            if info.file_size > MAX_ZIP_PDF_BYTES:
-                yield name, None, f"ZIP 内 PDF 超过单文件限制（{MAX_ZIP_PDF_BYTES // 1024 // 1024} MiB）"
-                continue
-            if read_budget + info.file_size > MAX_ZIP_TOTAL_BYTES:
-                yield name, None, f"ZIP 内 PDF 累计大小超过限制（{MAX_ZIP_TOTAL_BYTES // 1024 // 1024} MiB）"
-                continue
-            # Reserve before opening so corrupt members also consume the budget.
-            read_budget += info.file_size
-            try:
-                with archive.open(info) as stream:
-                    payload = stream.read(min(info.file_size, MAX_ZIP_PDF_BYTES) + 1)
-                if len(payload) != info.file_size:
-                    raise ValueError("解压内容大小与 ZIP 记录不一致")
-            except NotImplementedError:
-                yield name, None, "ZIP 中的 PDF 使用了不支持的压缩方式"
-                continue
-            except Exception as exc:
-                # zipfile delegates to zlib/bz2/lzma; malformed streams can raise
-                # codec-specific errors as well as BadZipFile or RuntimeError.
-                yield name, None, f"ZIP 内 PDF 解压失败（损坏或压缩方式不可用）：{type(exc).__name__}"
-                continue
-            yield name, payload, ""
-        if not candidates:
-            yield "", None, ""
+        try:
+            archive = zipfile.ZipFile(io.BytesIO(payload))
+        except (zipfile.BadZipFile, OSError, ValueError, NotImplementedError) as exc:
+            yield archive_error(prefix, f"无法读取 ZIP 压缩包，文件可能已损坏或格式不受支持：{type(exc).__name__}")
+            return
+        with archive:
+            entries = archive.infolist()
+            state["entries"] += len(entries)
+            if state["entries"] > MAX_ZIP_ENTRIES:
+                yield archive_error(prefix, f"ZIP 累计条目数超过限制（{MAX_ZIP_ENTRIES} 项）")
+                return
+            for info in entries:
+                name = _zip_member_name(info)
+                if info.is_dir() or not name.lower().endswith((".pdf", ".zip")):
+                    continue
+                path = f"{prefix}/{name}" if prefix else name
+                is_zip = name.lower().endswith(".zip")
+                kind = "压缩包" if is_zip else "PDF"
+                if not is_zip:
+                    state["pdf_candidates"] += 1
+
+                def member_error(error):
+                    if is_zip:
+                        return archive_error(path, error)
+                    state["errors"] += 1
+                    return path, None, error
+
+                if is_zip and depth >= MAX_ZIP_DEPTH:
+                    yield member_error(f"ZIP 嵌套层数超过限制（最多 {MAX_ZIP_DEPTH} 层，包含邮件外层）")
+                    continue
+                if stat.S_ISLNK(info.external_attr >> 16):
+                    yield member_error(f"ZIP 中的 {kind} 条目是符号链接，已拒绝读取")
+                    continue
+                if info.flag_bits & 1:
+                    yield member_error(f"ZIP 中的 {kind} 已加密，暂不支持密码解压")
+                    continue
+                member_limit = MAX_ZIP_BYTES if is_zip else MAX_ZIP_PDF_BYTES
+                if info.file_size > member_limit:
+                    yield member_error(f"ZIP 内 {kind} 超过单文件限制（{member_limit // 1024 // 1024} MiB）")
+                    continue
+                if state["read_budget"] + info.file_size > MAX_ZIP_TOTAL_BYTES:
+                    yield member_error(f"ZIP 累计大小超过限制（{MAX_ZIP_TOTAL_BYTES // 1024 // 1024} MiB，含内层压缩包）")
+                    continue
+                # Reserve first so bad streams also consume the tree-wide budget.
+                state["read_budget"] += info.file_size
+                try:
+                    with archive.open(info) as stream:
+                        member_data = stream.read(min(info.file_size, member_limit) + 1)
+                    if len(member_data) != info.file_size:
+                        raise ValueError("解压内容大小与 ZIP 记录不一致")
+                except NotImplementedError:
+                    yield member_error(f"ZIP 中的 {kind} 使用了不支持的压缩方式")
+                    continue
+                except Exception as exc:
+                    # ZIP codecs can raise format-specific errors beyond BadZipFile.
+                    yield member_error(f"ZIP 内 {kind} 解压失败（损坏或压缩方式不可用）：{type(exc).__name__}")
+                    continue
+                if is_zip:
+                    yield from visit(member_data, path, depth + 1)
+                else:
+                    yield path, member_data, ""
+
+    yield from visit(data, "", 1)
+    if not state["pdf_candidates"] and not state["errors"]:
+        yield "", None, ""
+
+
+def _without_covered_merged_pdfs(candidates):
+    """Ignore a merged copy only if this outer ZIP contains every single invoice.
+
+    Failed archive members make the set incomplete, so preserve all merged files.
+    Unreadable or uncertain PDFs keep the ordinary save/validation behavior.
+    """
+    candidates = list(candidates)
+    if any(error for _, _, error in candidates):
+        return candidates, 0
+    from invoice_extract import invoice_numbers_from_pdf_bytes
+
+    numbers_by_index = {}
+    single_numbers = set()
+    for index, (name, data, error) in enumerate(candidates):
+        if not name or data is None or not data.startswith(b"%PDF-"):
+            continue
+        try:
+            numbers = invoice_numbers_from_pdf_bytes(data)
+        except Exception:
+            continue
+        numbers_by_index[index] = numbers
+        if len(numbers) == 1:
+            single_numbers.update(numbers)
+    ignored = {
+        index for index, numbers in numbers_by_index.items()
+        if len(numbers) > 1 and numbers <= single_numbers
+    }
+    return [candidate for index, candidate in enumerate(candidates) if index not in ignored], len(ignored)
 
 
 def _save_pdf(data: bytes, output_dir: Path, stem: str, digest: str) -> Path:
@@ -525,7 +582,8 @@ def fetch_qq_invoices(
     sources: jd / pinduoduo / alipay; None selects all three.
     emails counts matching messages; links counts unique JD URLs; attachments
     counts PDF attachment candidates, including members of ZIP attachments;
-    archives counts ZIP attachments. File outcomes are downloaded/skipped/failed;
+    archives counts outer ZIP attachments. merged_ignored counts covered merged
+    copies omitted before counting PDF candidates. File outcomes are downloaded/skipped/failed;
     failed also includes unreadable messages or messages with no supported PDF.
     Content hashes, never filenames or invoice numbers, determine duplicates.
     dedupe_dirs optionally includes other folders' direct PDF files in that check.
@@ -542,7 +600,7 @@ def fetch_qq_invoices(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     start_dt, imap_date = parse_start_time(start_time)
-    counters = ("emails", "links", "attachments", "archives", "downloaded", "skipped", "failed")
+    counters = ("emails", "links", "attachments", "archives", "merged_ignored", "downloaded", "skipped", "failed")
     result = {key: 0 for key in counters}
     result["errors"] = []
     result["sources"] = {
@@ -562,9 +620,9 @@ def fetch_qq_invoices(
         if stat.S_ISDIR(folder_info.st_mode) and folder != output_dir:
             existing_hashes.update(_existing_pdf_hashes(folder))
 
-    def count(source, key):
-        result[key] += 1
-        result["sources"][source][key] += 1
+    def count(source, key, amount=1):
+        result[key] += amount
+        result["sources"][source][key] += amount
 
     def report_error(context, detail):
         # A transport exception can include a signed URL. Never echo credentials
@@ -655,7 +713,8 @@ def fetch_qq_invoices(
                 for kind, attachment_name, data in _invoice_attachments(msg):
                     if kind == "zip":
                         count(source, "archives")
-                        candidates = _zip_pdf_attachments(data)
+                        candidates, merged_ignored = _without_covered_merged_pdfs(_zip_pdf_attachments(data))
+                        count(source, "merged_ignored", merged_ignored)
                         file_context = f"{context}｜压缩包：{_diagnostic_text(attachment_name, 100)}"
                     else:
                         candidates = ((attachment_name, data, ""),)

@@ -40,6 +40,7 @@ from duplicate_files import (
 from invoice_extract import (
     AVAILABLE_FIELDS,
     DEFAULT_FIELDS,
+    MULTI_INVOICE_STATUS,
     PARSER_VERSION,
     parse_invoice,
     sha256_file,
@@ -72,6 +73,7 @@ APP_TITLE = "InvoiceManager"
 DB_FILENAME = ".invoice_manager.db"
 EXPORT_FILENAME = "发票汇总.xlsx"
 FOLDER_POLL_MS = 2000
+QQ_IMPORT_RULES_VERSION = "2"
 LOCAL_BACKUP_DIRNAME = ".invoice_manager_backups"
 PROJECT_URL = "https://github.com/Ultraman-Leo-7/InvoiceManager"
 SYNC_LOCK = threading.Lock()
@@ -343,13 +345,24 @@ def _sync_folder(progress=None) -> dict:
             row["digest"]: {field: row[column] for field, column in FIELD_DB_MAP.items()}
             for row in previous_rows if int(row["parser_version"] or 0) == PARSER_VERSION
         }
-        if (get_setting_conn(conn, "filing_layout_version") != "1"
-                and get_setting_conn(conn, "filing_backup_done") != "1"):
-            create_local_safety_backup(DB_PATH, LOCAL_BACKUP_DIR, reason="before-filing")
+        needs_layout_backup = (get_setting_conn(conn, "filing_layout_version") != "1"
+                               and get_setting_conn(conn, "filing_backup_done") != "1")
+        needs_parser_backup = (
+            any(int(row["parser_version"] or 0) != PARSER_VERSION for row in previous_rows)
+            and get_setting_conn(conn, "filing_parser_backup_version") != str(PARSER_VERSION)
+        )
+        if needs_layout_backup or needs_parser_backup:
+            create_local_safety_backup(
+                DB_PATH, LOCAL_BACKUP_DIR,
+                reason="before-filing" if needs_layout_backup else "before-parser-upgrade",
+            )
             hide_windows_file(LOCAL_BACKUP_DIR)
             # Persist once before moving files. Locked inputs may retry often;
             # repeated snapshots must not evict the original pre-migration copy.
-            set_setting_conn(conn, "filing_backup_done", "1")
+            if needs_layout_backup:
+                set_setting_conn(conn, "filing_backup_done", "1")
+            if needs_parser_backup:
+                set_setting_conn(conn, "filing_parser_backup_version", str(PARSER_VERSION))
             conn.commit()
         prepared = prepare_invoice_files(
             BASE_DIR, parse_invoice=parse_invoice, cached_records=cached,
@@ -369,6 +382,19 @@ def _sync_folder(progress=None) -> dict:
         for row in previous_rows:
             if row["active"] and row["filename"] in deferred_names:
                 conn.execute("UPDATE invoices SET active=1 WHERE digest=?", (row["digest"],))
+        # Retain historical user metadata, but clear obsolete parsed values before
+        # original invoices can inherit them through the filename/number fallback.
+        for entry in prepared.get("rejected_records", []):
+            data = invoice_record_to_db(entry["record"])
+            conn.execute("""
+                UPDATE invoices SET
+                    invoice_no=:invoice_no, issue_date=:issue_date,
+                    buyer=:buyer, seller=:seller, project=:project, total=:total,
+                    amount_wo_tax=:amount_wo_tax, tax=:tax, issuer=:issuer,
+                    parse_status=:parse_status, parser_version=:parser_version,
+                    active=0
+                WHERE digest=:digest
+            """, {**data, "digest": entry["digest"], "parser_version": PARSER_VERSION})
         for i, entry in enumerate(entries, 1):
             pdf, digest = entry["path"], entry["digest"]
             if progress:
@@ -386,13 +412,15 @@ def _sync_folder(progress=None) -> dict:
                 record = entry["record"]
                 data = invoice_record_to_db(record)
                 manual = conn.execute(
-                    "SELECT confirmed, note FROM invoices WHERE filename=? ORDER BY active DESC, last_seen DESC LIMIT 1",
-                    (pdf.name,),
+                    "SELECT confirmed, note FROM invoices WHERE filename=? AND parser_version=? AND COALESCE(parse_status, '') != ? "
+                    "ORDER BY active DESC, last_seen DESC LIMIT 1",
+                    (pdf.name, PARSER_VERSION, MULTI_INVOICE_STATUS),
                 ).fetchone()
                 if not manual and data["invoice_no"]:
                     manual = conn.execute(
-                        "SELECT confirmed, note FROM invoices WHERE invoice_no=? ORDER BY active DESC, last_seen DESC LIMIT 1",
-                        (data["invoice_no"],),
+                        "SELECT confirmed, note FROM invoices WHERE invoice_no=? AND parser_version=? AND COALESCE(parse_status, '') != ? "
+                        "ORDER BY active DESC, last_seen DESC LIMIT 1",
+                        (data["invoice_no"], PARSER_VERSION, MULTI_INVOICE_STATUS),
                     ).fetchone()
                 confirmed = int(manual["confirmed"]) if manual else 0
                 note = str(manual["note"] or "") if manual else ""
@@ -1972,19 +2000,24 @@ class InvoiceApp(tk.Tk):
         win.title("从QQ邮箱获取发票")
         win.transient(self)
         win.grab_set()
-        win.geometry("600x400")
+        win.geometry("600x450")
         outer = ttk.Frame(win, padding=14)
         outer.pack(fill="both", expand=True)
         ttk.Label(outer, text=f"邮箱：{email_addr}").pack(anchor="w")
         ttk.Label(outer, text="支持京东、拼多多、支付宝发票管家导出邮件。").pack(anchor="w", pady=(4, 0))
-        # A JD-only cursor cannot cover the newly supported historical mail.
         last = get_setting("qq_invoice_last_fetch", "")
+        needs_history_rescan = get_setting("qq_invoice_import_rules_version", "") != QQ_IMPORT_RULES_VERSION
         last_text = last.replace("T", " ")[:16] if last else "尚未成功获取过"
         ttk.Label(outer, text=f"上次成功获取：{last_text}").pack(anchor="w", pady=(4, 12))
-        mode_var = tk.StringVar(value="last" if last else "all")
+        if needs_history_rescan:
+            ttk.Label(
+                outer, wraplength=560,
+                text="嵌套压缩包读取已升级，建议扫描一次全部历史收件箱，补齐旧版漏读的发票；已有 PDF 会按哈希跳过。",
+            ).pack(anchor="w", pady=(0, 10))
+        mode_var = tk.StringVar(value="all" if needs_history_rescan or not last else "last")
         ttk.Radiobutton(
             outer,
-            text="从上次成功获取之后（推荐）",
+            text="从上次成功获取之后" + ("" if needs_history_rescan else "（推荐）"),
             variable=mode_var,
             value="last",
             state="normal" if last else "disabled",
@@ -1996,7 +2029,10 @@ class InvoiceApp(tk.Tk):
             outer,
             text="格式：YYYY-MM-DD 或 YYYY-MM-DD HH:MM；只填日期默认 00:00",
         ).pack(anchor="w", padx=(24, 0), pady=(0, 6))
-        ttk.Radiobutton(outer, text="扫描全部历史收件箱", variable=mode_var, value="all").pack(anchor="w", pady=3)
+        ttk.Radiobutton(
+            outer, text="扫描全部历史收件箱" + ("（本次推荐）" if needs_history_rescan else ""),
+            variable=mode_var, value="all",
+        ).pack(anchor="w", pady=3)
         buttons = ttk.Frame(outer)
         buttons.pack(fill="x", pady=(18, 0))
 
@@ -2013,6 +2049,7 @@ class InvoiceApp(tk.Tk):
         def worker():
             started = datetime.now()
             try:
+                needs_history_rescan = get_setting("qq_invoice_import_rules_version", "") != QQ_IMPORT_RULES_VERSION
                 self.set_status("正在连接 QQ 邮箱...")
                 result = fetch_qq_invoices(
                     email_addr=email_addr,
@@ -2027,6 +2064,10 @@ class InvoiceApp(tk.Tk):
                 has_failures = bool(result["failed"] or stats.get("filing_errors") or stats.get("deferred_paths") or stats.get("rescan_needed"))
                 if not has_failures:
                     set_setting("qq_invoice_last_fetch", started.isoformat(timespec="seconds"))
+                    if needs_history_rescan and start_time is None:
+                        set_setting("qq_invoice_import_rules_version", QQ_IMPORT_RULES_VERSION)
+                        needs_history_rescan = False
+                result["history_rescan_pending"] = needs_history_rescan
                 self.after(0, self.refresh_all)
                 msg = format_mail_fetch_report(result, stats)
                 self.set_status(f"邮箱获取完成：新下载 {result['downloaded']}，失败 {result['failed']}；异常文件 {stats.get('abnormal_count', 0)} 项")

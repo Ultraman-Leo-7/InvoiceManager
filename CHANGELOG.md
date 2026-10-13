@@ -4,6 +4,16 @@ All notable changes to InvoiceManager will be documented here.
 
 ## Unreleased
 
+## v5.2.23
+
+### Fixed
+
+- Read nested ZIPs in supported invoice email attachments under shared archive-read limits, so batch exports containing an inner archive of original invoices are imported
+- Prefer individual invoice PDFs and ignore a combined copy only when its invoice numbers are fully covered by the individual PDFs; do not count the same batch again through its combined copy
+- Detect PDFs containing multiple distinct invoice numbers and preserve them in `异常/` instead of recording only the first invoice's amount; re-parse older cached records so previously imported combined PDFs leave the active invoice list
+- Preserve combined originals and their database history without copying their manual purchase association to multiple individual invoices
+- Default the first mailbox fetch after this upgrade to all history so previously skipped inner ZIPs can be recovered; retain the recovery reminder after a limited scan until a full-history fetch completes successfully
+
 ## v5.2.22
 
 ### Fixed

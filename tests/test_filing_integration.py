@@ -454,3 +454,170 @@ def test_update_download_and_checksum_survive_concurrent_folder_scan(filing_case
     output = self_update.download_verified_update(release, filing_case.root)
     assert output.read_bytes() == executable
     assert not (filing_case.root / (self_update.CHECKSUM_ASSET + ".update")).exists()
+
+
+def seed_v4_invoice(path, *, number="12345678901234567890", total=12.5, note="", confirmed=0):
+    digest = app.sha256_file(path)
+    with app.connect_db() as conn:
+        conn.execute(
+            "INSERT INTO invoices(digest, filename, invoice_no, total, parser_version, confirmed, note, active, last_seen) "
+            "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (digest, path.name, number, total, 4, confirmed, note, 1, "2026-10-13T12:00:00"),
+        )
+    return digest
+
+
+def mark_existing_v4_layout():
+    app.set_setting("filing_layout_version", "1")
+    app.set_setting("filing_backup_done", "1")
+    app.set_setting("filing_parser_backup_version", "4")
+
+
+@pytest.mark.parametrize("first_name", ["original-first.pdf", "merged.pdf"])
+def test_v4_merged_invoice_is_quarantined_without_transferring_manual_data_to_originals(
+        filing_case, monkeypatch, first_name):
+    import sqlite3
+
+    case = filing_case
+    first = make_invoice(case.root, first_name)
+    second = make_invoice(case.root, "original-second.pdf", number="98765432109876543210", amount="33.00")
+    case.invoices.mkdir()
+    merged = case.invoices / "merged.pdf"
+    with fitz.open() as combined:
+        for source in (first, second):
+            with fitz.open(source) as document:
+                combined.insert_pdf(document)
+        combined.save(merged)
+    merged_bytes = merged.read_bytes()
+    merged_digest = seed_v4_invoice(merged, note="旧合并件人工备注", confirmed=1)
+    valid = make_invoice(case.invoices, "valid-old.pdf", number="11223344556677889900", amount="20.00")
+    valid_digest = seed_v4_invoice(valid, number="11223344556677889900", total=20, note="旧单票人工备注", confirmed=1)
+    with app.connect_db() as conn:
+        purchase_id = add_purchase(conn, "旧合并件关联记录", "12.50", False, 0)
+        set_manual_match(conn, purchase_id, "商品", merged_digest)
+    mark_existing_v4_layout()
+    real_backup = app.create_local_safety_backup
+    snapshots = []
+
+    def record_backup(*args, **kwargs):
+        snapshot = real_backup(*args, **kwargs)
+        snapshots.append(snapshot)
+        return snapshot
+
+    monkeypatch.setattr(app, "create_local_safety_backup", record_backup)
+    stats = app.sync_folder()
+
+    assert app.PARSER_VERSION == 5
+    assert stats["abnormal_count"] == 1
+    assert stats["unique"] == 3
+    assert stats["failed"] == 0
+    assert (case.abnormal / "merged.pdf").read_bytes() == merged_bytes
+    rows = {row["digest"]: row for row in app.all_active_rows()}
+    assert merged_digest not in rows
+    assert (rows[valid_digest]["confirmed"], rows[valid_digest]["note"], rows[valid_digest]["total"]) == (1, "旧单票人工备注", 20)
+    imported = [row for digest, row in rows.items() if digest != valid_digest]
+    assert {row["invoice_no"] for row in imported} == {"12345678901234567890", "98765432109876543210"}
+    assert {row["total"] for row in imported} == {12.5, 33}
+    assert all(row["confirmed"] == 0 and row["note"] == "" for row in imported)
+    with app.connect_db() as conn:
+        old = conn.execute("SELECT active, confirmed, note FROM invoices WHERE digest=?", (merged_digest,)).fetchone()
+        assert tuple(old) == (0, 1, "旧合并件人工备注")
+        override = conn.execute("SELECT purchase_id, invoice_digest FROM purchase_invoice_overrides").fetchone()
+        assert tuple(override) == (purchase_id, merged_digest)
+        assert conn.execute("SELECT COUNT(*) FROM purchases").fetchone()[0] == 1
+    assert len(snapshots) == 1
+    with sqlite3.connect(snapshots[0]) as snapshot:
+        assert snapshot.execute("SELECT active, parser_version, note FROM invoices WHERE digest=?", (merged_digest,)).fetchone() == (1, 4, "旧合并件人工备注")
+    assert app.get_setting("filing_parser_backup_version") == "5"
+    app.sync_folder()
+    assert len(snapshots) == 1
+
+
+def test_parser_upgrade_snapshot_is_not_repeated_when_reparse_is_temporarily_locked(filing_case, monkeypatch):
+    case = filing_case
+    original = make_invoice(case.invoices)
+    digest = seed_v4_invoice(original, note="解析前保留", confirmed=1)
+    mark_existing_v4_layout()
+    real_backup = app.create_local_safety_backup
+    real_parse = app.parse_invoice
+    snapshots = []
+
+    def record_backup(*args, **kwargs):
+        snapshot = real_backup(*args, **kwargs)
+        snapshots.append(snapshot)
+        return snapshot
+
+    def locked_file(path):
+        raise PermissionError("Synthetic parser migration lock")
+
+    monkeypatch.setattr(app, "create_local_safety_backup", record_backup)
+    monkeypatch.setattr(app, "parse_invoice", locked_file)
+    for _ in range(3):
+        stats = app.sync_folder()
+        assert original in stats["deferred_paths"]
+        assert app.all_active_rows()[0]["digest"] == digest
+    assert len(snapshots) == 1
+    assert app.get_setting("filing_parser_backup_version") == "5"
+    monkeypatch.setattr(app, "parse_invoice", real_parse)
+    assert app.sync_folder()["failed"] == 0
+    assert len(snapshots) == 1
+    row = app.all_active_rows()[0]
+    assert (row["parser_version"], row["confirmed"], row["note"]) == (5, 1, "解析前保留")
+
+
+def test_parser_upgrade_snapshot_failure_blocks_reparse_and_preserves_existing_state(filing_case, monkeypatch):
+    case = filing_case
+    original = make_invoice(case.invoices)
+    content = original.read_bytes()
+    digest = seed_v4_invoice(original, note="快照失败不动旧记录", confirmed=1)
+    mark_existing_v4_layout()
+
+    def failing_backup(*args, **kwargs):
+        raise OSError("Synthetic parser snapshot failure")
+
+    monkeypatch.setattr(app, "create_local_safety_backup", failing_backup)
+    monkeypatch.setattr(app, "parse_invoice", lambda path: pytest.fail("Must back up before reparsing"))
+    with pytest.raises(OSError, match="Synthetic parser snapshot failure"):
+        app.sync_folder()
+
+    assert original.read_bytes() == content
+    assert app.get_setting("filing_parser_backup_version") == "4"
+    row = app.all_active_rows()[0]
+    assert (row["digest"], row["parser_version"], row["note"], row["confirmed"]) == (digest, 4, "快照失败不动旧记录", 1)
+
+
+def test_locked_v4_merged_cache_cannot_pass_manual_metadata_to_new_originals(filing_case, monkeypatch):
+    case = filing_case
+    first = make_invoice(case.root, "original-first.pdf")
+    second = make_invoice(case.root, "original-second.pdf", number="98765432109876543210", amount="33.00")
+    case.invoices.mkdir()
+    merged = case.invoices / "merged.pdf"
+    with fitz.open() as combined:
+        for source in (first, second):
+            with fitz.open(source) as document:
+                combined.insert_pdf(document)
+        combined.save(merged)
+    merged_digest = seed_v4_invoice(merged, note="锁定的旧合并件备注", confirmed=1)
+    mark_existing_v4_layout()
+    real_parse = app.parse_invoice
+
+    def locked_merged(path):
+        if path == merged:
+            raise PermissionError("Synthetic locked merged invoice")
+        return real_parse(path)
+
+    monkeypatch.setattr(app, "parse_invoice", locked_merged)
+    stats = app.sync_folder()
+
+    assert merged in stats["deferred_paths"]
+    rows = {row["digest"]: row for row in app.all_active_rows()}
+    assert rows[merged_digest]["parser_version"] == 4
+    assert (rows[merged_digest]["confirmed"], rows[merged_digest]["note"]) == (1, "锁定的旧合并件备注")
+    imported = [row for digest, row in rows.items() if digest != merged_digest]
+    assert len(imported) == 2
+    assert all(row["parser_version"] == 5 and row["confirmed"] == 0 and row["note"] == "" for row in imported)
+    monkeypatch.setattr(app, "parse_invoice", real_parse)
+    final_stats = app.sync_folder()
+    assert final_stats["unique"] == 2
+    assert final_stats["abnormal_count"] == 1
+    assert all(row["confirmed"] == 0 and row["note"] == "" for row in app.all_active_rows())

@@ -46,7 +46,9 @@ If the PDF still does not appear, check that:
 
 ## Why did my file move to 异常?
 
-From v5.2.21, PDFs with both an invoice number and a finite total amount go to `发票/`; zero and negative amounts are accepted. Other input formats, missing-number/missing-amount PDFs and unreadable PDFs are preserved in `异常/` and excluded from the active invoice list. The application, database, backups and export files stay in place.
+From v5.2.21, PDFs with both an invoice number and a finite total amount go to `发票/`; zero and negative amounts are accepted. Other input formats, missing-number/missing-amount PDFs and unreadable PDFs are preserved in `异常/` and excluded from the active invoice list. From v5.2.23, combined PDFs with multiple distinct invoice numbers also go to `异常/` instead of being recorded using only the first invoice's amount. The application, database, backups and export files stay in place.
+
+Multiple pages carrying the same invoice number still count as one invoice. The combined-invoice check uses invoice-layout evidence and excludes references to original or blue invoices inside a red invoice.
 
 Files in `异常/` are counted but not repeatedly re-parsed. Inspect or repair a file, then move it back next to the exe to retry. A ZIP placed manually in the root also goes to `异常/`; archive reading is provided for supported mailbox attachments, not as a general local ZIP importer.
 
@@ -104,9 +106,21 @@ When reporting this problem, do not post the real invoice URL publicly if it con
 
 ## Alipay invoice manager exported multiple invoices as ZIP
 
-From v5.2.21, supported Alipay and Pinduoduo email attachments can be PDFs or ZIP files containing PDFs. The application reads each PDF member, deduplicates it against local PDFs, then files it into `发票/` or `异常/`. XML and other non-PDF members are ignored and the ZIP itself is not saved.
+From v5.2.21, supported Alipay and Pinduoduo email attachments can be PDFs or ZIP files containing PDFs. Version 5.2.23 also reads nested ZIPs under shared limits for the entire archive tree. The application reads each PDF member, deduplicates it against local PDFs, then files it into `发票/` or `异常/`. XML, spreadsheet reimbursement forms and other non-PDF members are ignored and ZIP containers are not saved.
+
+Limits per ZIP attachment tree are four levels including the outer attachment, 2,000 total entries (including folders and ignored members), and 200 MiB of attempted PDF/inner-ZIP expansion. Each ZIP and each PDF is limited to 50 MiB. Inner ZIPs do not increase the displayed ZIP attachment count.
+
+When the same ZIP attachment, including its nested ZIPs, contains individual original invoices plus a combined copy, the individual PDFs take priority. The combined copy is ignored only when its invoice numbers are fully covered by those individual PDFs and no archive member read failed. Otherwise it is preserved and routed to `异常/`; combined PDFs are not automatically split or entered as a single invoice.
 
 Encrypted, damaged or oversized archives and unreadable PDF members appear in failure details. A matching email with no usable PDF is still a failure. The downloaded count includes PDFs later filed into `异常/`; it is not a count of invoices that passed field extraction.
+
+## A combined invoice PDF moved to 异常 after upgrading
+
+Earlier versions could miss original invoices inside nested ZIPs and import a combined PDF using only the first invoice's fields. Version 5.2.23 re-parses those cached PDFs and removes multi-invoice documents from the active list. The original file and its database history remain available; no file is deleted.
+
+The first mailbox fetch after this upgrade defaults to **扫描全部历史收件箱** to recover individual originals. Existing identical PDFs are skipped by content hash. If you choose a limited start time, the history-recovery reminder remains until a full-history fetch and filing pass completes successfully.
+
+Review the purchase associations after recovering originals. A manual association on the old combined PDF is not copied to several new invoices, which would risk associating the wrong amounts.
 
 ## A purchase has shipping, but InvoiceManager does not look for item price + shipping as one invoice
 
