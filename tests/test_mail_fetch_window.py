@@ -11,18 +11,32 @@ import pytest
 import app
 
 
-@pytest.fixture
-def root():
+@pytest.fixture(scope="module")
+def tk_host():
     if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
         pytest.skip("Real Tk window requires DISPLAY on Linux; Windows always runs this test")
-    window = tk.Tk()
+    # Match the app's single-interpreter lifetime and avoid repeatedly tearing
+    # down and reloading Tcl/Tk libraries between cases on Windows CI.
+    host = tk.Tk()
+    host.withdraw()
+    yield host
+    host.destroy()
+
+
+@pytest.fixture
+def root(tk_host):
+    # Each case still gets an independent native main window and child report.
+    # Restore the interpreter-wide DPI setting so case order cannot leak state.
+    scaling = tk_host.tk.call("tk", "scaling")
+    window = tk.Toplevel(tk_host)
     window.geometry("400x240+0+0")
     window.update()
-    yield window
     try:
-        window.destroy()
-    except tk.TclError:
-        pass
+        yield window
+    finally:
+        if window.winfo_exists():
+            window.destroy()
+        tk_host.tk.call("tk", "scaling", scaling)
 
 
 def descendants(widget):
