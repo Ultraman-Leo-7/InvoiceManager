@@ -431,3 +431,26 @@ def test_input_arriving_during_scan_triggers_followup_instead_of_being_missed(fi
     assert not (case.root / "late.pdf").exists()
     assert (case.invoices / "late.pdf").exists()
     assert app.completed_scan_signature(second_pass) == second_pass["scan_signature"]
+
+
+def test_update_download_and_checksum_survive_concurrent_folder_scan(filing_case, monkeypatch):
+    import hashlib
+    import self_update
+
+    executable = b"Synthetic executable used only for update regression testing"
+    checksum = f"{hashlib.sha256(executable).hexdigest()}  {self_update.EXE_ASSET}\n".encode()
+    release = {"assets": [
+        {"name": self_update.EXE_ASSET, "browser_download_url": "synthetic-exe"},
+        {"name": self_update.CHECKSUM_ASSET, "browser_download_url": "synthetic-sums"},
+    ]}
+
+    def download(url, destination, **kwargs):
+        destination.write_bytes(executable if url == "synthetic-exe" else checksum)
+        assert app.sync_folder()["abnormal_count"] == 0
+        assert destination.is_file()
+        return destination
+
+    monkeypatch.setattr(self_update, "_download", download)
+    output = self_update.download_verified_update(release, filing_case.root)
+    assert output.read_bytes() == executable
+    assert not (filing_case.root / (self_update.CHECKSUM_ASSET + ".update")).exists()

@@ -4,6 +4,13 @@ All notable changes to InvoiceManager will be documented here.
 
 ## Unreleased
 
+## v5.2.22
+
+### Fixed
+
+- Keep the updater's temporary SHA256 checksum file in place during automatic filing, so a concurrent folder scan cannot interrupt software updates
+- Verify the complete update download/checksum flow while file organization runs between download steps
+
 ## v5.2.21
 
 ### Added

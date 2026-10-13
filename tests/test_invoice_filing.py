@@ -157,7 +157,7 @@ def test_program_database_export_backup_and_development_files_are_protected(tmp_
         ".invoice_manager.db", ".invoice_manager.db-wal", ".invoice_manager.db-shm",
         ".invoice_manager.db-journal", "settings.json", "InvoiceManager-Windows-x64.exe",
         "InvoiceManager.update", "InvoiceManager-20261013-120000.db", "latest.db",
-        "SHA256SUMS.txt", "发票汇总.xlsx", "app.py", "README.md", "build.bat", "run.cmd",
+        "SHA256SUMS.txt", "SHA256SUMS.txt.update", "发票汇总.xlsx", "app.py", "README.md", "build.bat", "run.cmd",
         "install.ps1", "app.spec", "requirements.txt", "requirements-dev.txt", "LICENSE",
         "part.pdf.crdownload", "pending.tmp", "custom-data.bin", "custom-export.xlsx",
     ]
