@@ -1303,7 +1303,8 @@ class InvoiceApp(tk.Tk):
             ]
             groups = [group for group in groups if group["remove"]]
         self._pending_duplicate_prompt = (groups, force)
-        if self._duplicate_prompt_scheduled or self._duplicate_dialog_open or not groups:
+        if (self._duplicate_prompt_scheduled or self._duplicate_dialog_open or not groups
+                or getattr(self, "_mail_result_windows", ())):
             return
         self._duplicate_prompt_scheduled = True
         self.after(200, self._show_pending_duplicate_prompt)
@@ -1312,6 +1313,8 @@ class InvoiceApp(tk.Tk):
         self._duplicate_prompt_scheduled = False
         groups, force = self._pending_duplicate_prompt
         if not groups or self._duplicate_dialog_open:
+            return
+        if getattr(self, "_mail_result_windows", ()):
             return
         if self._sync_running or self.tk.call("grab", "current", self._w):
             self._duplicate_prompt_scheduled = True
@@ -1957,15 +1960,21 @@ class InvoiceApp(tk.Tk):
     def show_mail_fetch_result(self, message, has_failures, duplicates):
         win = tk.Toplevel(self)
         win.title("邮箱获取结果")
-        win.transient(self)
+        # A normal, non-modal window can be minimized without locking the app.
+        open_results = self.__dict__.setdefault("_mail_result_windows", set())
+        open_results.add(win)
+        # Keep the newest scan, even if an older result window is closed last.
+        self._pending_duplicate_prompt = (duplicates, False)
         win.geometry("860x580")
         win.minsize(680, 420)
         outer = ttk.Frame(win, padding=14)
         outer.pack(fill="both", expand=True)
+        outer.columnconfigure(0, weight=1)
+        outer.rowconfigure(1, weight=1)
         heading = "获取完成，部分项目需要处理" if has_failures else "获取完成"
-        ttk.Label(outer, text=heading, font=("Microsoft YaHei UI", 12, "bold")).pack(anchor="w", pady=(0, 10))
+        ttk.Label(outer, text=heading, font=("Microsoft YaHei UI", 12, "bold")).grid(row=0, column=0, sticky="w", pady=(0, 10))
         body = ttk.Frame(outer)
-        body.pack(fill="both", expand=True)
+        body.grid(row=1, column=0, sticky="nsew")
         details = tk.Text(body, wrap="word", font=("Microsoft YaHei UI", 10), padx=10, pady=10)
         scrollbar = ttk.Scrollbar(body, orient="vertical", command=details.yview)
         details.configure(yscrollcommand=scrollbar.set)
@@ -1975,18 +1984,22 @@ class InvoiceApp(tk.Tk):
         details.configure(state="disabled")
         closed = False
 
-        def close():
+        def close(_event=None):
             nonlocal closed
             if closed:
-                return
+                return "break"
             closed = True
+            open_results.discard(win)
             win.destroy()
-            self.queue_duplicate_prompt(duplicates)
+            if not open_results:
+                groups, force = self._pending_duplicate_prompt
+                self.queue_duplicate_prompt(groups, force=force)
+            return "break"
 
-        ttk.Button(outer, text="确定", command=close).pack(anchor="e", pady=(12, 0))
+        ttk.Button(outer, text="确定", command=close).grid(row=2, column=0, sticky="e", pady=(12, 0))
         win.protocol("WM_DELETE_WINDOW", close)
-        win.bind("<Escape>", lambda _event: close())
-        win.grab_set()
+        win.bind("<Escape>", close)
+        win.bind("<Return>", close)
         details.focus_set()
 
     def _nutstore_credentials(self) -> tuple[str, str]:

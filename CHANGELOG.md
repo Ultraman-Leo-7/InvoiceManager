@@ -4,6 +4,14 @@ All notable changes to InvoiceManager will be documented here.
 
 ## Unreleased
 
+## v5.2.20
+
+### Fixed
+
+- Make mailbox result windows independently minimizable and non-modal so the main application remains usable
+- Reserve space for the confirmation button at smaller window sizes and higher display scaling; support Enter, Escape and window-close dismissal
+- Defer duplicate-file confirmation until all result windows close, preserving the latest scan when multiple results are open
+
 ## v5.2.19
 
 ### Fixed

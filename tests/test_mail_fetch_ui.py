@@ -29,7 +29,7 @@ class MailView:
     def refresh_all(self):
         self.refreshed += 1
 
-    def queue_duplicate_prompt(self, groups):
+    def queue_duplicate_prompt(self, groups, force=False):
         self.duplicate_prompts.append(groups)
 
     def finish_callbacks(self):
@@ -216,12 +216,84 @@ class FakeWidget:
         pass
 
 
-@pytest.mark.parametrize("dismiss", ["button", "escape", "close"])
-def test_result_dialog_keeps_full_details_and_prompts_duplicates_only_after_close(monkeypatch, dismiss):
-    from tests.test_duplicate_dialog import FakeWidget as ReportWidget, FakeWindow
+class ReportWidget:
+    def __init__(self, *args, **kwargs):
+        self.options = kwargs
+        self.text = []
+        self.grid_options = {}
+        self.row_weights = {}
+        self.column_weights = {}
 
-    window = FakeWindow()
-    texts, buttons, scrollbars = [], [], []
+    def pack(self, **kwargs):
+        pass
+
+    def grid(self, **kwargs):
+        self.grid_options = kwargs
+
+    def rowconfigure(self, index, **kwargs):
+        self.row_weights[index] = kwargs
+
+    grid_rowconfigure = rowconfigure
+
+    def columnconfigure(self, index, **kwargs):
+        self.column_weights[index] = kwargs
+
+    grid_columnconfigure = columnconfigure
+
+    def configure(self, **kwargs):
+        self.options.update(kwargs)
+
+    def insert(self, index, text):
+        self.text.append(text)
+
+    def yview(self, *args):
+        pass
+
+    def set(self, *args):
+        pass
+
+    def focus_set(self):
+        pass
+
+
+class ReportWindow(ReportWidget):
+    def __init__(self):
+        super().__init__()
+        self.protocols = {}
+        self.bindings = {}
+        self.destroy_count = 0
+        self.transient_calls = []
+        self.grab_calls = 0
+
+    def title(self, value):
+        self.options["title"] = value
+
+    def geometry(self, value):
+        self.options["geometry"] = value
+
+    def minsize(self, *args):
+        self.options["minsize"] = args
+
+    def transient(self, parent):
+        self.transient_calls.append(parent)
+
+    def grab_set(self):
+        self.grab_calls += 1
+
+    def protocol(self, name, callback):
+        self.protocols[name] = callback
+
+    def bind(self, name, callback):
+        self.bindings[name] = callback
+
+    def destroy(self):
+        self.destroy_count += 1
+
+
+@pytest.mark.parametrize("dismiss", ["button", "return", "escape", "close"])
+def test_result_dialog_keeps_full_details_and_prompts_duplicates_only_after_close(monkeypatch, dismiss):
+    window = ReportWindow()
+    texts, buttons, scrollbars, frames = [], [], [], []
 
     def collect(target, *args, **kwargs):
         widget = ReportWidget(*args, **kwargs)
@@ -233,7 +305,7 @@ def test_result_dialog_keeps_full_details_and_prompts_duplicates_only_after_clos
         Text=lambda *args, **kwargs: collect(texts, *args, **kwargs),
     ))
     monkeypatch.setattr(app, "ttk", SimpleNamespace(
-        Frame=ReportWidget, Label=ReportWidget,
+        Frame=lambda *args, **kwargs: collect(frames, *args, **kwargs), Label=ReportWidget,
         Scrollbar=lambda *args, **kwargs: collect(scrollbars, *args, **kwargs),
         Button=lambda *args, **kwargs: collect(buttons, *args, **kwargs),
     ))
@@ -247,16 +319,84 @@ def test_result_dialog_keeps_full_details_and_prompts_duplicates_only_after_clos
     assert texts[0].text == [report]
     assert texts[0].options["state"] == "disabled"
     assert scrollbars[0].options["command"] == texts[0].yview
+    assert window.transient_calls == []
+    assert window.grab_calls == 0
+    assert frames[0].row_weights[1]["weight"] == 1
+    assert frames[1].grid_options["row"] == 1
+    assert buttons[0].grid_options["row"] == 2
     if dismiss == "button":
         buttons[0].options["command"]()
+    elif dismiss == "return":
+        window.bindings["<Return>"](None)
     elif dismiss == "escape":
         window.bindings["<Escape>"](None)
     else:
         window.protocols["WM_DELETE_WINDOW"]()
-    assert window.destroyed
+    assert window.destroy_count == 1
     assert view.duplicate_prompts == [duplicates]
     window.protocols["WM_DELETE_WINDOW"]()
+    assert window.destroy_count == 1
     assert view.duplicate_prompts == [duplicates]
+
+
+def test_multiple_result_windows_only_queue_latest_duplicates_when_last_closes(monkeypatch):
+    windows = []
+
+    def make_window(*args):
+        window = ReportWindow()
+        windows.append(window)
+        return window
+
+    monkeypatch.setattr(app, "tk", SimpleNamespace(Toplevel=make_window, Text=ReportWidget))
+    monkeypatch.setattr(app, "ttk", SimpleNamespace(
+        Frame=ReportWidget, Label=ReportWidget, Scrollbar=ReportWidget, Button=ReportWidget,
+    ))
+    view = MailView()
+    older = [{"remove": ["synthetic-old-copy.pdf"]}]
+    latest = [{"remove": ["synthetic-latest-copy.pdf"]}]
+    app.InvoiceApp.show_mail_fetch_result(view, "较早的合成结果", False, older)
+    app.InvoiceApp.show_mail_fetch_result(view, "最新的合成结果", False, latest)
+
+    windows[1].protocols["WM_DELETE_WINDOW"]()
+    assert view.duplicate_prompts == []
+    windows[0].protocols["WM_DELETE_WINDOW"]()
+    assert view.duplicate_prompts == [latest]
+    assert view._mail_result_windows == set()
+    windows[0].bindings["<Return>"](None)
+    assert view.duplicate_prompts == [latest]
+
+
+@pytest.mark.parametrize("force", [False, True])
+def test_scan_defers_duplicate_prompt_while_result_is_open_without_polling(force):
+    view = MailView()
+    view._mail_result_windows = {ReportWindow()}
+    view._handled_duplicate_files = set()
+    view._duplicate_dialog_open = False
+    view._duplicate_prompt_scheduled = False
+    view._show_pending_duplicate_prompt = lambda: pytest.fail("Result is still open")
+    latest = [{"digest": "synthetic-hash", "keep": "synthetic.pdf", "remove": ["synthetic-copy.pdf"]}]
+
+    app.InvoiceApp.queue_duplicate_prompt(view, latest, force=force)
+
+    assert view._pending_duplicate_prompt == (latest, force)
+    assert view._duplicate_prompt_scheduled is False
+    assert view.callbacks == []
+
+
+def test_already_scheduled_duplicate_prompt_waits_for_result_close_without_polling():
+    view = MailView()
+    view._mail_result_windows = {ReportWindow()}
+    view._duplicate_dialog_open = False
+    view._duplicate_prompt_scheduled = True
+    groups = [{"digest": "synthetic-hash", "keep": "synthetic.pdf", "remove": ["synthetic-copy.pdf"]}]
+    view._pending_duplicate_prompt = (groups, False)
+
+    app.InvoiceApp._show_pending_duplicate_prompt(view)
+
+    assert view._duplicate_prompt_scheduled is False
+    assert view._pending_duplicate_prompt == (groups, False)
+    assert view._duplicate_dialog_open is False
+    assert view.callbacks == []
 
 
 def test_upgrading_from_jd_only_defaults_to_all_history(monkeypatch):
