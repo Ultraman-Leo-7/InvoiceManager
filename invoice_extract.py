@@ -21,8 +21,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import sys
+import unicodedata
 from copy import deepcopy
 from pathlib import Path
 from typing import Iterable
@@ -48,7 +50,8 @@ SETTINGS_JSON = BASE_DIR / "settings.json"
 CACHE_SHEET = "__invoice_cache__"
 
 # 修改解析规则时增加此版本号，可让旧缓存自动失效并重新解析。
-PARSER_VERSION = 4
+PARSER_VERSION = 5
+MULTI_INVOICE_STATUS = "需复核：多张发票合并文件，请使用单张原始发票"
 
 DEFAULT_FIELDS = ["文件名", "项目名称", "价税合计"]
 
@@ -187,12 +190,118 @@ def read_pdf(path: Path):
         for page in doc:
             page_texts.append(page.get_text("text", sort=True))
             pages_words.append(page.get_text("words", sort=True))
-        return "\n".join(page_texts), pages_words
+        return "\f".join(page_texts), pages_words
     finally:
         doc.close()
 
 
 # ---------- 字段提取 ----------
+
+_INVOICE_NUMBER_RE = re.compile(r"发票(?:号码|号)[:：]?(\d{8,30})(?!\d)")
+_INVOICE_TITLE_RE = re.compile(
+    r"电子发票(?:\([^)]{0,20}\))?|增值税(?:电子)?(?:普通|专用)发票"
+)
+_INVOICE_DATE_RE = re.compile(r"开票日期[:：]?\d{4}(?:年\d{1,2}月\d{1,2}日|[-/.]\d{1,2}[-/.]\d{1,2})")
+_REFERENCE_PREFIX_RE = re.compile(r"(?:原始|原|蓝字|对应|关联|被冲红|被红冲)(?:的)?$")
+_REFERENCE_CONTEXT_RE = re.compile(
+    r"(?:原始|原|蓝字|对应|关联|被冲红|被红冲)(?:的)?"
+    r"(?:蓝字)?(?:数电|电子)?(?:增值税)?(?:普通|专用)?(?:发票|票)"
+)
+
+
+def _invoice_numbers_from_pages(text_pages: Iterable[str], *, require_single_evidence=False) -> frozenset[str]:
+    """Find actual invoice-number fields, using nearby headers as evidence.
+
+    Red invoices can reference their original blue invoice. Exclude explicit
+    references, and when distinct numbers remain require independent nearby
+    title/date markers. Each marker supports only its closest number field;
+    remarks cannot borrow a real invoice's header to become a second invoice.
+    """
+    candidates = []
+    supported = set()
+    unclear_number_field = False
+    for text in text_pages:
+        t = compact(unicodedata.normalize("NFKC", text))
+        titles = [match for match in _INVOICE_TITLE_RE.finditer(t)
+                  if not _REFERENCE_PREFIX_RE.search(t[max(0, match.start() - 16):match.start()])]
+
+        def is_reference(match):
+            start = max(0, match.start() - 100)
+            # A fresh actual invoice title ends the preceding invoice's remarks.
+            for title in titles:
+                if title.end() <= match.start():
+                    start = max(start, title.end())
+            prefix = t[start:match.start()]
+            return bool(_REFERENCE_PREFIX_RE.search(prefix)
+                        or _REFERENCE_CONTEXT_RE.search(prefix + "发票"))
+
+        all_numbers = list(_INVOICE_NUMBER_RE.finditer(t))
+        actual = [match for match in all_numbers if not is_reference(match)]
+        complete_starts = {match.start() for match in all_numbers}
+        for label in re.finditer(r"发票(?:号码|号)[:：]?", t):
+            if label.start() not in complete_starts and not is_reference(label):
+                unclear_number_field = True
+        candidates.extend(match.group(1) for match in actual)
+        dates = [match for match in _INVOICE_DATE_RE.finditer(t) if not is_reference(match)]
+        for marker in [*titles, *dates]:
+            eligible = []
+            for number in actual:
+                gap_start, gap_end = ((marker.end(), number.start()) if marker.end() <= number.start()
+                                      else (number.end(), marker.start()))
+                if gap_end < gap_start or gap_end - gap_start > 160:
+                    continue
+                if any(gap_start <= other.start() < gap_end for other in all_numbers):
+                    continue
+                if re.search(r"备注|价税合计|开票人|项目名称|销售方", t[gap_start:gap_end]):
+                    continue
+                eligible.append((gap_end - gap_start, number.start(), number.group(1)))
+            if eligible:
+                supported.add(min(eligible)[2])
+    distinct = frozenset(candidates)
+    if unclear_number_field:
+        return frozenset()
+    if len(distinct) <= 1:
+        if require_single_evidence and not distinct.issubset(supported):
+            return frozenset()
+        return distinct
+    # Returning only one number from an ambiguous multi-number document could
+    # mislead archive de-duplication into treating a merged PDF as an original.
+    return distinct if distinct == supported else frozenset()
+
+
+def invoice_numbers_from_pdf_bytes(data: bytes) -> frozenset[str]:
+    """Return reliable actual invoice numbers from a PDF's text layer.
+
+    More than one number is returned only with independent invoice-header
+    evidence. Repeated pages of one invoice remain one number; explicit original
+    or blue-invoice references are excluded. A single-number result also needs
+    header evidence and a finite invoice total, so a download notice cannot
+    stand in for an original invoice. Unclear/textless PDFs return an empty set.
+    Invalid/encrypted PDF reading errors propagate;
+    callers must never use them as evidence to discard another file.
+    """
+    with fitz.open(stream=data, filetype="pdf") as document:
+        text_pages = [page.get_text("text", sort=True) for page in document]
+    numbers = _invoice_numbers_from_pages(text_pages, require_single_evidence=True)
+    if len(numbers) == 1 and _extract_total("\n".join(text_pages)) is None:
+        return frozenset()
+    return numbers
+
+
+def _extract_total(text: str) -> float | None:
+    total_s = first_group([
+        r"(?:价税合计)?[（(]?小写[）)]?[:：]?[￥¥]?\s*(-?[\d,]+\.\d{2})",
+        r"价税合计.{0,120}?[￥¥]\s*(-?[\d,]+\.\d{2})",
+    ], compact(text), re.S)
+    total = money_to_float(total_s)
+    return total if total is not None and math.isfinite(total) else None
+
+
+def _empty_invoice_record(path: Path, status: str) -> dict:
+    record = {field: "" for field in AVAILABLE_FIELDS}
+    record.update({"文件名": path.name, "价税合计": None, "金额（不含税）": None,
+                   "税额": None, "提取状态": status})
+    return record
 
 def extract_party(text: str, party: str) -> str:
     t = compact(text)
@@ -297,24 +406,12 @@ def parse_invoice(path: Path) -> dict:
     t = compact(text)
 
     if len(t) < 30:
-        return {
-            "文件名": path.name,
-            "发票号码": "",
-            "开票日期": "",
-            "购买方名称": "",
-            "销售方名称": "",
-            "项目名称": "",
-            "价税合计": None,
-            "金额（不含税）": None,
-            "税额": None,
-            "开票人": "",
-            "提取状态": "需复核：PDF 无可用文字层，可能是扫描件",
-        }
+        return _empty_invoice_record(path, "需复核：PDF 无可用文字层，可能是扫描件")
 
-    invoice_no = first_group([
-        r"发票号码[:：]?\s*(\d{8,30})",
-        r"发票号[:：]?\s*(\d{8,30})",
-    ], t)
+    invoice_numbers = _invoice_numbers_from_pages(text.split("\f"))
+    if len(invoice_numbers) > 1:
+        return _empty_invoice_record(path, MULTI_INVOICE_STATUS)
+    invoice_no = next(iter(invoice_numbers), "")
 
     issue_date = first_group([
         r"开票日期[:：]?\s*(\d{4}年\d{1,2}月\d{1,2}日)",
@@ -324,11 +421,7 @@ def parse_invoice(path: Path) -> dict:
     buyer = extract_party(text, "buyer")
     seller = extract_party(text, "seller")
 
-    total_s = first_group([
-        r"(?:价税合计)?[（(]?小写[）)]?[:：]?[￥¥]?\s*(-?[\d,]+\.\d{2})",
-        r"价税合计.{0,120}?[￥¥]\s*(-?[\d,]+\.\d{2})",
-    ], t, re.S)
-    total = money_to_float(total_s)
+    total = _extract_total(text)
 
     amount_wo_tax = None
     tax = None

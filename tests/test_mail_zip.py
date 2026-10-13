@@ -8,8 +8,10 @@ from email.message import EmailMessage
 from pathlib import Path
 from types import SimpleNamespace
 
+import fitz
 import pytest
 
+import invoice_extract
 import jd_qq
 
 
@@ -255,7 +257,8 @@ def test_invalid_pdf_member_fails_but_other_pdfs_still_import(tmp_path, fetch_ma
 def mutate_first_entry(data, field, value):
     """Change both headers for one synthetic entry, retaining the second entry."""
     data = bytearray(data)
-    central = data.index(b"PK\x01\x02")
+    end_record = data.rfind(b"PK\x05\x06")
+    central = struct.unpack_from("<I", data, end_record + 16)[0]
     if field == "flag":
         struct.pack_into("<H", data, 6, value)
         struct.pack_into("<H", data, central + 8, value)
@@ -336,3 +339,178 @@ def test_zip_does_not_change_sender_or_subject_filter(tmp_path, fetch_mail):
     result = fetch_mail([wrong_sender, wrong_subject], tmp_path)
     assert result["emails"] == result["archives"] == result["downloaded"] == 0
     assert list(tmp_path.iterdir()) == []
+
+
+def test_nested_zip_imports_all_twenty_four_pdfs_and_counts_only_outer_archive(tmp_path, fetch_mail):
+    pdfs = [PDF_A + str(index).encode() for index in range(24)]
+    inner = make_zip([(f"文件夹/票{index}.PDF", data) for index, data in enumerate(pdfs)])
+    payload = make_zip([("子目录/独立票.zip", inner), ("明细.xlsx", b"ignored spreadsheet")])
+    result = fetch_mail([make_message(payload)], tmp_path)
+    assert (result["emails"], result["archives"], result["attachments"], result["downloaded"], result["failed"]) == (1, 1, 24, 24, 0)
+    assert {path.read_bytes() for path in tmp_path.iterdir()} == set(pdfs)
+    again = fetch_mail([make_message(payload)], tmp_path)
+    assert (again["archives"], again["attachments"], again["downloaded"], again["skipped"]) == (1, 24, 0, 24)
+
+
+def test_inner_zip_error_includes_hierarchy_and_keeps_outer_pdf(tmp_path, fetch_mail):
+    middle = make_zip([("broken.zip", b"not a zip")])
+    payload = make_zip([("middle.zip", middle), ("good.pdf", PDF_A)])
+    result = fetch_mail([make_message(payload)], tmp_path)
+    assert (result["archives"], result["attachments"], result["downloaded"], result["failed"]) == (1, 1, 1, 1)
+    assert "middle.zip/broken.zip" in result["errors"][0]
+    assert "损坏" in result["errors"][0]
+
+
+def test_inner_pdf_error_includes_both_zip_and_member_name(tmp_path, fetch_mail):
+    inner = mutate_first_entry(make_zip([("bad.pdf", PDF_A)], zipfile.ZIP_STORED), "flag", 1)
+    payload = make_zip([("inner.zip", inner), ("good.pdf", PDF_B)])
+    result = fetch_mail([make_message(payload)], tmp_path)
+    assert (result["archives"], result["attachments"], result["downloaded"], result["failed"]) == (1, 2, 1, 1)
+    assert "inner.zip/bad.pdf" in result["errors"][0] and "已加密" in result["errors"][0]
+
+
+def test_encrypted_inner_zip_is_not_counted_as_pdf_candidate(tmp_path, fetch_mail):
+    inner = make_zip([("inside.pdf", PDF_A)])
+    payload = make_zip([("locked.zip", inner), ("good.pdf", PDF_B)], zipfile.ZIP_STORED)
+    payload = mutate_first_entry(payload, "flag", 1)
+    result = fetch_mail([make_message(payload)], tmp_path)
+    assert (result["archives"], result["attachments"], result["downloaded"], result["failed"]) == (1, 1, 1, 1)
+    assert "locked.zip" in result["errors"][0] and "已加密" in result["errors"][0]
+
+
+@pytest.mark.parametrize("depth,failed", [(4, 0), (5, 1)])
+def test_zip_depth_limit_includes_outer_attachment(tmp_path, fetch_mail, depth, failed):
+    payload = make_zip([("deep.pdf", PDF_A)])
+    for index in range(depth - 1):
+        payload = make_zip([(f"level{index}.zip", payload)])
+    message = make_message(payload)
+    message.add_attachment(PDF_B, maintype="application", subtype="pdf", filename="direct.pdf")
+    result = fetch_mail([message], tmp_path)
+    assert result["failed"] == failed
+    assert result["downloaded"] == 2 - failed
+    assert result["archives"] == 1
+    if failed:
+        assert "嵌套层数超过限制" in result["errors"][0]
+
+
+def test_zip_entry_budget_is_shared_across_sibling_archives(tmp_path, fetch_mail, monkeypatch):
+    monkeypatch.setattr(jd_qq, "MAX_ZIP_ENTRIES", 4)
+    first = make_zip([("first.pdf", PDF_A)])
+    second = make_zip([("second.pdf", PDF_B)])
+    payload = make_zip([("first.zip", first), ("second.zip", second), ("last.pdf", PDF_B)])
+    result = fetch_mail([make_message(payload)], tmp_path)
+    assert (result["archives"], result["attachments"], result["downloaded"], result["failed"]) == (1, 2, 2, 1)
+    assert "second.zip" in result["errors"][0] and "累计条目数" in result["errors"][0]
+
+
+def test_zip_total_budget_includes_nested_archive_payloads_and_all_pdfs(tmp_path, fetch_mail, monkeypatch):
+    first = make_zip([("first.pdf", PDF_A)])
+    second = make_zip([("second.pdf", PDF_B)])
+    monkeypatch.setattr(jd_qq, "MAX_ZIP_TOTAL_BYTES", len(first) + len(PDF_A) + len(second))
+    payload = make_zip([("first.zip", first), ("second.zip", second)])
+    result = fetch_mail([make_message(payload)], tmp_path)
+    assert (result["attachments"], result["downloaded"], result["failed"]) == (2, 1, 1)
+    assert "second.zip/second.pdf" in result["errors"][0] and "累计大小" in result["errors"][0]
+
+
+def test_nested_pdf_free_archives_with_direct_pdf_are_silent(tmp_path, fetch_mail):
+    payload = make_zip([("inner.zip", make_zip([("invoice.xml", b"<invoice/>")]))])
+    message = make_message(payload)
+    message.add_attachment(PDF_A, maintype="application", subtype="pdf", filename="direct.pdf")
+    result = fetch_mail([message], tmp_path)
+    assert (result["archives"], result["attachments"], result["downloaded"], result["failed"]) == (1, 1, 1, 0)
+
+
+@pytest.fixture
+def synthetic_invoice_numbers(monkeypatch):
+    payloads = {
+        "first": PDF_A, "second": PDF_B, "third": PDF_A + b"third",
+        "merged": PDF_A + b"merged", "other_merged": PDF_A + b"other-merged",
+        "unknown": PDF_A + b"unknown", "damaged": PDF_A + b"damaged",
+    }
+    identities = {
+        payloads["first"]: frozenset({"synthetic-A"}), payloads["second"]: frozenset({"synthetic-B"}),
+        payloads["third"]: frozenset({"synthetic-C"}), payloads["merged"]: frozenset({"synthetic-A", "synthetic-B"}),
+        payloads["other_merged"]: frozenset({"synthetic-A", "synthetic-B"}), payloads["unknown"]: frozenset(),
+    }
+
+    def numbers(data):
+        if data == payloads["damaged"]:
+            raise ValueError("Synthetic unreadable PDF")
+        return identities.get(data, frozenset())
+
+    monkeypatch.setattr(invoice_extract, "invoice_numbers_from_pdf_bytes", numbers)
+    return payloads
+
+
+def test_fully_covered_merged_copy_is_ignored_even_when_it_precedes_inner_zip(tmp_path, fetch_mail, synthetic_invoice_numbers):
+    data = synthetic_invoice_numbers
+    inner = make_zip([("first.pdf", data["first"]), ("second.pdf", data["second"])])
+    payload = make_zip([("combined.pdf", data["merged"]), ("individual.zip", inner)])
+    result = fetch_mail([make_message(payload)], tmp_path)
+    assert (result["archives"], result["attachments"], result["downloaded"], result["merged_ignored"], result["failed"]) == (1, 2, 2, 1, 0)
+    assert result["sources"]["alipay"]["merged_ignored"] == 1
+    assert {path.read_bytes() for path in tmp_path.iterdir()} == {data["first"], data["second"]}
+    again = fetch_mail([make_message(payload)], tmp_path)
+    assert (again["attachments"], again["skipped"], again["merged_ignored"]) == (2, 2, 1)
+
+
+@pytest.mark.parametrize("extra", ["first", "other_merged", "unknown", "damaged"])
+def test_incomplete_or_unreliable_coverage_keeps_merged_pdf(tmp_path, fetch_mail, synthetic_invoice_numbers, extra):
+    data = synthetic_invoice_numbers
+    payload = make_zip([("combined.pdf", data["merged"]), ("other.pdf", data[extra])])
+    result = fetch_mail([make_message(payload)], tmp_path)
+    assert (result["attachments"], result["downloaded"], result["merged_ignored"]) == (2, 2, 0)
+    assert data["merged"] in {path.read_bytes() for path in tmp_path.iterdir()}
+
+
+def test_archive_error_keeps_merged_pdf_despite_apparent_full_coverage(tmp_path, fetch_mail, synthetic_invoice_numbers):
+    data = synthetic_invoice_numbers
+    payload = make_zip([
+        ("first.pdf", data["first"]), ("second.pdf", data["second"]),
+        ("combined.pdf", data["merged"]), ("broken.zip", b"damaged"),
+    ])
+    result = fetch_mail([make_message(payload)], tmp_path)
+    assert (result["attachments"], result["downloaded"], result["merged_ignored"], result["failed"]) == (3, 3, 0, 1)
+
+
+@pytest.mark.parametrize("separate_messages", [False, True])
+def test_merged_coverage_never_crosses_outer_archives(tmp_path, fetch_mail, synthetic_invoice_numbers, separate_messages):
+    data = synthetic_invoice_numbers
+    singles = make_zip([("first.pdf", data["first"]), ("second.pdf", data["second"])])
+    merged = make_zip([("combined.pdf", data["merged"])])
+    messages = [make_message(singles)]
+    if separate_messages:
+        messages.append(make_message(merged))
+    else:
+        messages[0].add_attachment(merged, maintype="application", subtype="zip", filename="second.zip")
+    result = fetch_mail(messages, tmp_path)
+    assert (result["archives"], result["attachments"], result["downloaded"], result["merged_ignored"]) == (2, 3, 3, 0)
+
+
+def test_real_notice_pdf_cannot_cover_an_original_invoice_in_merged_copy(tmp_path, fetch_mail):
+    def render_pdf(pages):
+        with fitz.open() as document:
+            for text in pages:
+                page = document.new_page()
+                page.insert_text((40, 40), text, fontname="china-s", fontsize=10)
+            return document.tobytes()
+
+    first_number = "11111111111111111111"
+    second_number = "22222222222222222222"
+    first = f"电子发票（普通发票）\n发票号码：{first_number}\n开票日期：2026年10月13日\n价税合计（小写）￥12.50"
+    second = f"电子发票（普通发票）\n发票号码：{second_number}\n开票日期：2026年10月13日\n价税合计（小写）￥20.00"
+    notice = render_pdf([
+        f"发票下载说明\n请联系开票单位处理此发票\n发票号码：{first_number}\n本文件仅为通知，没有发票金额。"
+    ])
+    original_second = render_pdf([second])
+    merged = render_pdf([first, second])
+    payload = make_zip([
+        ("notice.pdf", notice), ("second.pdf", original_second), ("combined.pdf", merged),
+    ])
+
+    result = fetch_mail([make_message(payload)], tmp_path)
+
+    assert (result["attachments"], result["downloaded"], result["merged_ignored"], result["failed"]) == (3, 3, 0, 0)
+    assert result["sources"]["alipay"]["merged_ignored"] == 0
+    assert {path.read_bytes() for path in tmp_path.iterdir()} == {notice, original_second, merged}

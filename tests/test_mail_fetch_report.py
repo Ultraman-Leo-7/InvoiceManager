@@ -6,7 +6,7 @@ from mail_fetch_report import format_mail_fetch_report
 
 def make_result(sources=None, *, unknown_failures=0, errors=None):
     sources = sources or {}
-    counters = ("emails", "links", "attachments", "archives", "downloaded", "skipped", "failed")
+    counters = ("emails", "links", "attachments", "archives", "downloaded", "skipped", "failed", "merged_ignored")
     result = {key: sum(source.get(key, 0) for source in sources.values()) for key in counters}
     result["failed"] += unknown_failures
     result["sources"] = sources
@@ -82,6 +82,8 @@ def test_all_success_uses_short_completion_message():
     assert text.endswith("获取完成，已更新“上次成功获取时间”。")
     assert "失败详情" not in text
     assert "本次未更新" not in text
+    assert "已忽略被单张原票" not in text
+    assert "仍需扫描全部历史收件箱" not in text
 
 
 def test_zero_mail_keeps_all_sources_and_does_not_claim_files_were_downloaded():
@@ -179,3 +181,46 @@ def test_rescan_needed_alone_reports_automatic_retry_without_advancing_checkpoin
     assert "扫描期间文件发生变化，程序会自动重新扫描" in text
     assert "已更新“上次成功获取时间”" not in text
     assert "获取完成" not in text
+
+
+def test_combined_pdf_ignored_counts_are_separate_from_hash_duplicates():
+    result = make_result({
+        "pinduoduo": {"emails": 1, "attachments": 2, "downloaded": 2, "merged_ignored": 1},
+        "alipay": {"emails": 2, "attachments": 4, "downloaded": 3, "skipped": 1, "merged_ignored": 2},
+    })
+    originals = deepcopy(result)
+
+    text = format_mail_fetch_report(result, {"total": 6})
+
+    assert "总计：新下载 5 份 PDF；内容相同跳过 1 份；失败 0 项。" in text
+    assert "已忽略被单张原票完整覆盖的合并 PDF 3 份（不计入内容相同跳过数）。" in text
+    pinduoduo_line = next(line for line in text.splitlines() if line.startswith("拼多多："))
+    alipay_line = next(line for line in text.splitlines() if line.startswith("支付宝发票管家："))
+    assert "已忽略被单张原票完整覆盖的合并 PDF 1 份。" in pinduoduo_line
+    assert "已忽略被单张原票完整覆盖的合并 PDF 2 份。" in alipay_line
+    assert "PDF 附件 6 份" in text
+    assert "PDF 附件数包含 ZIP 内的 PDF，不包含被忽略的合并副本。" in text
+    assert result == originals
+
+
+def test_successful_limited_fetch_keeps_history_recovery_reminder():
+    result = make_result({"alipay": {"emails": 1, "attachments": 2, "skipped": 2}})
+    result["history_rescan_pending"] = True
+
+    text = format_mail_fetch_report(result, {"total": 2})
+
+    assert "获取完成，已更新“上次成功获取时间”。" in text
+    assert "仍需扫描全部历史收件箱，补齐旧版漏读的嵌套发票；已有 PDF 按哈希跳过。" in text
+    assert "本次未更新" not in text
+
+
+def test_failed_fetch_keeps_history_recovery_reminder_without_success_claim():
+    result = make_result(unknown_failures=1, errors=["读取候选邮件失败"])
+    result["history_rescan_pending"] = True
+
+    text = format_mail_fetch_report(result, {"total": 0})
+
+    assert "本次未更新“上次成功获取时间”" in text
+    assert "已更新“上次成功获取时间”" not in text
+    assert "1. 读取候选邮件失败" in text
+    assert "仍需扫描全部历史收件箱" in text

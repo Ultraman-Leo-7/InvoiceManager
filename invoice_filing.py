@@ -222,7 +222,7 @@ def prepare_invoice_files(base_dir: Path, *, parse_invoice, cached_records=None,
     ``rescan_needed`` flags arrivals or changes that still need another pass.
     """
     base_dir = Path(base_dir)
-    result = {"records": [], "abnormal": 0, "errors": [], "moved": 0,
+    result = {"records": [], "rejected_records": [], "abnormal": 0, "errors": [], "moved": 0,
               "deferred_paths": [], "blocked": False, "scan_signature": None,
               "rescan_needed": False}
     try:
@@ -251,6 +251,7 @@ def prepare_invoice_files(base_dir: Path, *, parse_invoice, cached_records=None,
     if initial_stats:
         time.sleep(SETTLE_SECONDS)
     records_by_hash = dict(cached_records or {})
+    unparseable_hashes = set()
     processed_files = {}
     for index, source in enumerate(candidates, 1):
         if source not in initial_stats:
@@ -265,19 +266,23 @@ def prepare_invoice_files(base_dir: Path, *, parse_invoice, cached_records=None,
                 continue
             digest, signature = _hash_stable(source, _signature(before))
             record = None
+            parsed_record = False
             reused = False
             if source.suffix.casefold() == ".pdf":
                 if digest in records_by_hash:
                     record = dict(records_by_hash[digest])
+                    parsed_record = digest not in unparseable_hashes
                     reused = True
                 else:
                     try:
                         record = dict(parse_invoice(source))
+                        parsed_record = True
                     except (PermissionError, OSError):
                         raise
                     except Exception:
                         # A stable, readable but malformed PDF belongs in 异常.
                         record = {}
+                        unparseable_hashes.add(digest)
                     records_by_hash[digest] = record
             # Parsing may be slow; recheck bytes before deciding where to move.
             actual, signature = _hash_stable(source, signature)
@@ -300,6 +305,10 @@ def prepare_invoice_files(base_dir: Path, *, parse_invoice, cached_records=None,
                 record["文件名"] = destination.name
                 result["records"].append({"path": destination, "digest": digest, "record": record,
                                           "reused": reused, "arrival_time": arrival_time})
+            elif parsed_record:
+                record = dict(record)
+                record["文件名"] = destination.name
+                result["rejected_records"].append({"path": destination, "digest": digest, "record": record})
         except (OSError, ValueError) as exc:
             result["deferred_paths"].append(source)
             result["errors"].append(f"未整理“{source.name}”：{type(exc).__name__}: {exc}")

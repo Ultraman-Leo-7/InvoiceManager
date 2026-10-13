@@ -55,6 +55,11 @@ def fetch_case(tmp_path, monkeypatch):
     }
     groups = [{"keep": "invoice.pdf", "remove": ["invoice-copy.pdf"]}]
     calls, settings, notices, sync_calls = [], [], [], []
+    stored_settings = {"qq_invoice_import_rules_version": "2"}
+
+    def save_setting(key, value):
+        settings.append((key, value))
+        stored_settings[key] = value
 
     def fetch(**kwargs):
         calls.append(kwargs)
@@ -66,7 +71,8 @@ def fetch_case(tmp_path, monkeypatch):
 
     monkeypatch.setattr(app, "BASE_DIR", tmp_path)
     monkeypatch.setattr(app, "fetch_qq_invoices", fetch)
-    monkeypatch.setattr(app, "set_setting", lambda key, value: settings.append((key, value)))
+    monkeypatch.setattr(app, "get_setting", lambda key, default="": stored_settings.get(key, default))
+    monkeypatch.setattr(app, "set_setting", save_setting)
     monkeypatch.setattr(app, "sync_folder", sync)
     monkeypatch.setattr(app, "folder_signature", lambda: ("folder-after-download",))
     monkeypatch.setattr(app, "threading", SimpleNamespace(Thread=ImmediateThread))
@@ -85,11 +91,12 @@ def fetch_case(tmp_path, monkeypatch):
     return SimpleNamespace(
         view=view, result=result, calls=calls, settings=settings,
         notices=notices, sync_calls=sync_calls, groups=groups, folder=tmp_path,
+        stored_settings=stored_settings,
     )
 
 
-def run_fetch(case):
-    app.InvoiceApp.run_qq_fetch(case.view, "test@example.com", "fake-auth-code", None)
+def run_fetch(case, start_time=None):
+    app.InvoiceApp.run_qq_fetch(case.view, "test@example.com", "fake-auth-code", start_time)
 
 
 def test_unified_worker_passes_credentials_and_folder_to_mail_fetcher(fetch_case):
@@ -117,10 +124,8 @@ def test_success_updates_all_sources_cursor_and_reports_attachments(fetch_case):
     assert case.notices == []
     case.view.finish_callbacks()
 
-    assert len(case.settings) == 1
-    key, timestamp = case.settings[0]
-    assert key == "qq_invoice_last_fetch"
-    assert app.datetime.fromisoformat(timestamp)
+    assert app.datetime.fromisoformat(dict(case.settings)["qq_invoice_last_fetch"])
+    assert case.stored_settings["qq_invoice_import_rules_version"] == "2"
     assert case.view.refreshed == 1
     assert case.view.duplicate_prompts == [case.groups]
     kind, message = case.notices[0]
@@ -400,12 +405,24 @@ def test_already_scheduled_duplicate_prompt_waits_for_result_close_without_polli
     assert view.callbacks == []
 
 
-def test_upgrading_from_jd_only_defaults_to_all_history(monkeypatch):
+@pytest.mark.parametrize("stored_cursor,rules_version,expected_start", [
+    (None, None, None),
+    ("2026-10-12T12:00:00", None, None),
+    ("2026-10-12T12:00:00", "1", None),
+    ("2026-10-12T12:00:00", "2", "2026-10-12T12:00:00"),
+    (None, "2", None),
+])
+def test_mail_dialog_defaults_to_all_until_current_rules_have_scanned_history(
+        monkeypatch, stored_cursor, rules_version, expected_start):
     legacy_settings = {
         "qq_email": "test@example.com",
         "qq_auth_code": "encrypted-placeholder",
         "jd_last_fetch": "2026-10-12T12:00:00",
     }
+    if stored_cursor is not None:
+        legacy_settings["qq_invoice_last_fetch"] = stored_cursor
+    if rules_version is not None:
+        legacy_settings["qq_invoice_import_rules_version"] = rules_version
     read_keys, buttons, fetch_calls = [], [], []
 
     def get_setting(key, default=""):
@@ -431,7 +448,7 @@ def test_upgrading_from_jd_only_defaults_to_all_history(monkeypatch):
 
     assert "qq_invoice_last_fetch" in read_keys
     assert "jd_last_fetch" not in read_keys
-    assert fetch_calls == [("test@example.com", "fake-auth-code", None)]
+    assert fetch_calls == [("test@example.com", "fake-auth-code", expected_start)]
 
 
 @pytest.mark.parametrize("kind", ["filing-error", "changing-file"])
@@ -457,3 +474,49 @@ def test_filing_error_or_deferred_file_keeps_mail_cursor_and_retries_scan(fetch_
     assert "上次成功获取时间" in case.notices[0][1]
     if kind == "filing-error":
         assert "合成文件整理错误" in case.notices[0][1]
+
+
+def test_successful_full_history_import_marks_current_rules_version(fetch_case):
+    case = fetch_case
+    case.stored_settings["qq_invoice_import_rules_version"] = "1"
+    case.stored_settings["qq_invoice_last_fetch"] = "2026-10-12T12:00:00"
+
+    run_fetch(case)
+    case.view.finish_callbacks()
+
+    assert case.calls[0]["start_time"] is None
+    assert dict(case.settings)["qq_invoice_import_rules_version"] == "2"
+    assert app.datetime.fromisoformat(dict(case.settings)["qq_invoice_last_fetch"])
+    assert case.notices[0][0] == "info"
+
+
+def test_successful_limited_import_updates_cursor_but_keeps_history_migration_pending(fetch_case):
+    case = fetch_case
+    case.stored_settings["qq_invoice_import_rules_version"] = "1"
+    start_time = "2026-10-13T00:00:00"
+
+    run_fetch(case, start_time)
+    case.view.finish_callbacks()
+
+    assert case.calls[0]["start_time"] == start_time
+    assert "qq_invoice_import_rules_version" not in dict(case.settings)
+    assert case.stored_settings["qq_invoice_import_rules_version"] == "1"
+    assert app.datetime.fromisoformat(dict(case.settings)["qq_invoice_last_fetch"])
+    assert "历史" in case.notices[0][1]
+    assert "扫描" in case.notices[0][1]
+
+
+def test_failed_full_history_import_does_not_mark_new_rules_completed(fetch_case):
+    case = fetch_case
+    case.stored_settings["qq_invoice_import_rules_version"] = "1"
+    previous_cursor = "2026-10-12T12:00:00"
+    case.stored_settings["qq_invoice_last_fetch"] = previous_cursor
+    case.result.update(failed=1, errors=["Synthetic nested archive failure"])
+
+    run_fetch(case)
+    case.view.finish_callbacks()
+
+    assert case.settings == []
+    assert case.stored_settings["qq_invoice_import_rules_version"] == "1"
+    assert case.stored_settings["qq_invoice_last_fetch"] == previous_cursor
+    assert case.notices[0][0] == "warning"
