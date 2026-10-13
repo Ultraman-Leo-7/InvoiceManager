@@ -7,6 +7,7 @@ on:
       - "app.py"
       - "version.py"
       - "invoice_extract.py"
+      - "invoice_filing.py"
       - "jd_qq.py"
       - "purchase_tracker.py"
       - "data_backup.py"
@@ -49,8 +50,8 @@ jobs:
       - name: Syntax and import check
         shell: pwsh
         run: |
-          python -m py_compile app.py invoice_extract.py jd_qq.py purchase_tracker.py data_backup.py duplicate_files.py self_update.py tools/generate_icon.py
-          python -c "import app, invoice_extract, jd_qq, purchase_tracker, data_backup, self_update; print('import check ok')"
+          python -m py_compile app.py invoice_extract.py invoice_filing.py jd_qq.py purchase_tracker.py data_backup.py duplicate_files.py self_update.py tools/generate_icon.py
+          python -c "import app, invoice_extract, invoice_filing, jd_qq, purchase_tracker, data_backup, self_update; print('import check ok')"
 
       - name: Unit tests
         shell: pwsh

@@ -32,7 +32,9 @@ def invoice_folder(tmp_path, monkeypatch):
     monkeypatch.setattr(app, "parse_invoice", parse_test_invoice)
     monkeypatch.setattr(app.messagebox, "askyesno", unexpected_dialog)
     app.init_db()
-    return tmp_path
+    folder = tmp_path / "发票"
+    folder.mkdir(exist_ok=True)
+    return folder
 
 
 def make_pdf(folder, name, text="Test invoice"):
@@ -125,9 +127,11 @@ def test_empty_or_malformed_pdfs_are_not_offered_for_cleanup(invoice_folder, mon
     stats = app.sync_folder()
 
     assert stats["duplicates"] == []
-    assert stats["failed"] == 2
-    assert (invoice_folder / "a.pdf").read_bytes() == content
-    assert (invoice_folder / "b.pdf").read_bytes() == content
+    assert stats["failed"] == 0
+    assert stats["abnormal_count"] == 2
+    assert (app.abnormal_dir() / "a.pdf").read_bytes() == content
+    assert (app.abnormal_dir() / "b.pdf").read_bytes() == content
+    assert not list(invoice_folder.glob("*.pdf"))
 
 
 @pytest.mark.parametrize("delete", [True, False], ids=["confirm-delete", "decline-and-prefix"])

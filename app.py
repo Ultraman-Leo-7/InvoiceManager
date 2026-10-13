@@ -44,6 +44,13 @@ from invoice_extract import (
     parse_invoice,
     sha256_file,
 )
+from invoice_filing import (
+    abnormal_dir as filing_abnormal_dir,
+    count_abnormal,
+    inventory_signature,
+    invoice_dir as filing_invoice_dir,
+    prepare_invoice_files,
+)
 from jd_qq import fetch_qq_invoices
 from mail_fetch_report import format_mail_fetch_report
 from purchase_tracker import (
@@ -80,6 +87,45 @@ BASE_DIR = app_dir()
 DB_PATH = BASE_DIR / DB_FILENAME
 EXPORT_PATH = BASE_DIR / EXPORT_FILENAME
 LOCAL_BACKUP_DIR = BASE_DIR / LOCAL_BACKUP_DIRNAME
+
+
+def invoice_dir() -> Path:
+    return filing_invoice_dir(BASE_DIR)
+
+
+def abnormal_dir() -> Path:
+    return filing_abnormal_dir(BASE_DIR)
+
+
+def abnormal_count() -> int:
+    return count_abnormal(BASE_DIR)
+
+
+def filing_protected_paths():
+    return [DB_PATH, EXPORT_PATH, Path(sys.executable), Path(__file__),
+            *(DB_PATH.with_name(DB_PATH.name + suffix) for suffix in ("-wal", "-shm", "-journal", ".restore.tmp"))]
+
+
+def invoice_file_path(name: str, digest: str | None = None) -> Path:
+    if (not name or Path(name).name != name or any(char in name for char in ("/", "\\", ":", "\0"))
+            or Path(name).suffix.lower() != ".pdf"):
+        raise ValueError("发票文件名不安全")
+    # Root fallback lets a locked legacy file remain usable until filing retries.
+    for directory in (invoice_dir(), BASE_DIR):
+        path = directory / name
+        if path.is_symlink() or getattr(directory, "is_junction", lambda: False)() or directory.is_symlink():
+            raise ValueError("不处理链接文件或链接目录")
+        if path.is_file() and (digest is None or sha256_file(path) == digest):
+            return path
+    if digest is not None:
+        raise FileNotFoundError("未找到内容一致的发票文件，请刷新后重试")
+    return invoice_dir() / name
+
+
+def completed_scan_signature(stats):
+    if stats.get("deferred_paths") or stats.get("filing_errors") or stats.get("rescan_needed"):
+        return None
+    return stats["scan_signature"] if "scan_signature" in stats else folder_signature()
 
 
 class DATA_BLOB(ctypes.Structure):
@@ -274,32 +320,60 @@ def sync_folder(progress=None) -> dict:
 
 
 def _sync_folder(progress=None) -> dict:
-    pdfs = sorted(BASE_DIR.glob("*.pdf"), key=lambda p: p.name.lower())
     now = datetime.now().isoformat(timespec="seconds")
-    stats = {"total": len(pdfs), "reused": 0, "parsed": 0, "failed": 0, "removed": 0}
+    stats = {"total": 0, "reused": 0, "parsed": 0, "failed": 0, "removed": 0}
     files_by_hash = {}
     arrival_times = {}
 
-    def remember_pdf(pdf, digest):
+    def remember_pdf(pdf, digest, arrival_time):
         if pdf.is_symlink() or not pdf.is_file():
             return
         info = pdf.stat()
         if info.st_size > 0:
             files_by_hash.setdefault(digest, []).append(pdf.name)
-            arrival_times[pdf.name] = getattr(info, "st_birthtime", info.st_ctime)
+            arrival_times[pdf.name] = arrival_time
 
     with connect_db() as conn:
+        previous_rows = list(conn.execute("SELECT * FROM invoices"))
         preferred_names = {
-            row["digest"]: row["filename"]
-            for row in conn.execute("SELECT digest, filename FROM invoices")
+            row["digest"]: row["filename"] for row in previous_rows
         }
-        old_active = {row["digest"] for row in conn.execute("SELECT digest FROM invoices WHERE active=1")}
+        old_active = {row["digest"] for row in previous_rows if row["active"]}
+        cached = {
+            row["digest"]: {field: row[column] for field, column in FIELD_DB_MAP.items()}
+            for row in previous_rows if int(row["parser_version"] or 0) == PARSER_VERSION
+        }
+        if (get_setting_conn(conn, "filing_layout_version") != "1"
+                and get_setting_conn(conn, "filing_backup_done") != "1"):
+            create_local_safety_backup(DB_PATH, LOCAL_BACKUP_DIR, reason="before-filing")
+            hide_windows_file(LOCAL_BACKUP_DIR)
+            # Persist once before moving files. Locked inputs may retry often;
+            # repeated snapshots must not evict the original pre-migration copy.
+            set_setting_conn(conn, "filing_backup_done", "1")
+            conn.commit()
+        prepared = prepare_invoice_files(
+            BASE_DIR, parse_invoice=parse_invoice, cached_records=cached,
+            protected_paths=filing_protected_paths(), progress=progress,
+        )
+        if prepared.get("blocked"):
+            raise RuntimeError("文件整理无法开始：" + "；".join(prepared["errors"]))
+        entries = prepared["records"]
+        stats.update(total=len(entries), abnormal_count=prepared["abnormal"],
+                     filing_errors=prepared["errors"], deferred_paths=prepared.get("deferred_paths", []),
+                     moved=prepared["moved"], failed=len(prepared["errors"]))
+        if "scan_signature" in prepared:
+            stats["scan_signature"] = prepared["scan_signature"]
+        stats["rescan_needed"] = prepared.get("rescan_needed", False)
         conn.execute("UPDATE invoices SET active=0")
-        for i, pdf in enumerate(pdfs, 1):
+        deferred_names = {path.name for path in stats["deferred_paths"]}
+        for row in previous_rows:
+            if row["active"] and row["filename"] in deferred_names:
+                conn.execute("UPDATE invoices SET active=1 WHERE digest=?", (row["digest"],))
+        for i, entry in enumerate(entries, 1):
+            pdf, digest = entry["path"], entry["digest"]
             if progress:
-                progress(f"扫描 {i}/{len(pdfs)}：{pdf.name}")
+                progress(f"登记 {i}/{len(entries)}：{pdf.name}")
             try:
-                digest = sha256_file(pdf)
                 row = conn.execute("SELECT * FROM invoices WHERE digest=?", (digest,)).fetchone()
                 if row and int(row["parser_version"] or 0) == PARSER_VERSION:
                     conn.execute(
@@ -307,9 +381,9 @@ def _sync_folder(progress=None) -> dict:
                         (pdf.name, now, digest),
                     )
                     stats["reused"] += 1
-                    remember_pdf(pdf, digest)
+                    remember_pdf(pdf, digest, entry["arrival_time"])
                     continue
-                record = parse_invoice(pdf)
+                record = entry["record"]
                 data = invoice_record_to_db(record)
                 manual = conn.execute(
                     "SELECT confirmed, note FROM invoices WHERE filename=? ORDER BY active DESC, last_seen DESC LIMIT 1",
@@ -357,9 +431,10 @@ def _sync_folder(progress=None) -> dict:
                     **data,
                 })
                 stats["parsed"] += 1
-                remember_pdf(pdf, digest)
+                remember_pdf(pdf, digest, entry["arrival_time"])
             except Exception as e:
                 stats["failed"] += 1
+                stats["filing_errors"].append(f"登记失败：{pdf.name} | {type(e).__name__}: {e}")
                 if progress:
                     progress(f"解析失败：{pdf.name} | {type(e).__name__}: {e}")
         all_groups = build_duplicate_groups(files_by_hash, preferred_names, arrival_times=arrival_times)
@@ -372,6 +447,8 @@ def _sync_folder(progress=None) -> dict:
         current_active = {row["digest"] for row in conn.execute("SELECT digest FROM invoices WHERE active=1")}
         stats["removed"] = len(old_active - current_active)
         stats["unique"] = len(current_active)
+        if not stats["filing_errors"] and not stats["deferred_paths"]:
+            set_setting_conn(conn, "filing_layout_version", "1")
     return stats
 
 
@@ -379,10 +456,10 @@ def handle_duplicate_files(groups: list[dict], *, delete: bool) -> dict:
     """Apply the user's explicit choice, then reconcile records with actual files."""
     with SYNC_LOCK:
         if delete:
-            result = cleanup_duplicate_files(BASE_DIR, groups)
+            result = cleanup_duplicate_files(invoice_dir(), groups)
             result["renamed"] = []
         else:
-            result = rename_duplicate_files(BASE_DIR, groups)
+            result = rename_duplicate_files(invoice_dir(), groups)
             result["deleted"] = []
         try:
             result["stats"] = _sync_folder()
@@ -418,14 +495,7 @@ def current_match_data() -> dict:
 
 
 def folder_signature():
-    items = []
-    for p in BASE_DIR.glob("*.pdf"):
-        try:
-            st = p.stat()
-            items.append((p.name.lower(), st.st_size, st.st_mtime_ns))
-        except OSError:
-            pass
-    return tuple(sorted(items))
+    return inventory_signature(BASE_DIR, protected_paths=filing_protected_paths())
 
 
 def export_excel(fields: list[str]) -> int:
@@ -500,6 +570,7 @@ class InvoiceApp(tk.Tk):
         self.update_status_var = tk.StringVar(value="尚未检查更新")
         self._update_busy = False
         self.count_var = tk.StringVar(value="0 张发票")
+        self.abnormal_count_var = tk.StringVar(value="异常：0 项")
         self.search_var = tk.StringVar()
         self.search_scope_var = tk.StringVar(value="全部显示字段")
         self.only_unconfirmed_var = tk.BooleanVar(value=False)
@@ -525,6 +596,7 @@ class InvoiceApp(tk.Tk):
         top.pack(fill="x")
         ttk.Label(top, text=f"当前目录：{BASE_DIR}").pack(side="left")
         ttk.Label(top, textvariable=self.count_var).pack(side="right")
+        ttk.Button(top, textvariable=self.abnormal_count_var, command=self.open_abnormal_folder).pack(side="right", padx=(10, 12))
 
         actions = ttk.Frame(self, padding=(12, 0, 12, 8))
         actions.pack(fill="x")
@@ -811,13 +883,11 @@ class InvoiceApp(tk.Tk):
             return
         errors = []
         deleted = 0
-        for name in names:
-            path = (BASE_DIR / name).resolve()
+        for row in rows:
+            name = str(row["filename"])
             try:
-                if path.parent != BASE_DIR.resolve():
-                    raise RuntimeError("文件路径不在当前发票目录")
-                if path.exists():
-                    path.unlink()
+                path = invoice_file_path(name, row["digest"])
+                path.unlink()
                 deleted += 1
             except Exception as e:
                 errors.append(f"{name}: {type(e).__name__}: {e}")
@@ -1290,6 +1360,22 @@ class InvoiceApp(tk.Tk):
     def refresh_all(self):
         self.refresh_invoice_table()
         self.refresh_purchase_tab()
+        try:
+            self.abnormal_count_var.set(f"异常：{abnormal_count()} 项")
+        except (OSError, ValueError):
+            self.abnormal_count_var.set("异常：无法读取")
+
+    def open_abnormal_folder(self):
+        try:
+            folder = abnormal_dir()
+            folder.mkdir(exist_ok=True)
+            abnormal_count()  # Validate the folder before handing it to Explorer.
+            if os.name == "nt":
+                os.startfile(str(folder))
+            else:
+                subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", str(folder)])
+        except (OSError, ValueError) as error:
+            messagebox.showerror(APP_TITLE, f"无法打开异常文件夹：{error}")
 
     def queue_duplicate_prompt(self, groups, force=False):
         groups = pending_duplicate_groups(groups)
@@ -1362,7 +1448,7 @@ class InvoiceApp(tk.Tk):
             self._duplicate_dialog_open = False
             self._handled_duplicate_files.update(prompt_keys)
             win.destroy()
-            self._last_folder_signature = folder_signature() if result["stats"] is not None else None
+            self._last_folder_signature = completed_scan_signature(result["stats"]) if result["stats"] is not None else None
             self.refresh_all()
             self.status_var.set(
                 f"重复文件处理完成：删除 {len(result['deleted'])} 个，标记副本 {len(result['renamed'])} 个，"
@@ -1412,11 +1498,12 @@ class InvoiceApp(tk.Tk):
             try:
                 self.set_status(f"{source}：正在扫描发票文件夹...")
                 stats = sync_folder(progress=self.set_status)
-                self._last_folder_signature = folder_signature()
+                self._last_folder_signature = completed_scan_signature(stats)
                 msg = (
                     f"刷新完成：{stats['total']} 个 PDF，{stats['unique']} 张发票；复用 {stats['reused']}，重新解析 {stats['parsed']}，"
                     f"待处理重复 {sum(len(group['remove']) for group in stats['duplicates'])} 个，"
-                    f"移除 {stats['removed']}，解析异常 {stats['failed']}"
+                    f"移除 {stats['removed']}，异常文件 {stats.get('abnormal_count', 0)} 项，"
+                    f"整理失败 {stats['failed']} 项，暂缓 {len(stats.get('deferred_paths', []))} 项"
                 )
 
                 def finish():
@@ -1424,7 +1511,7 @@ class InvoiceApp(tk.Tk):
                     self.refresh_all()
                     self.status_var.set(msg)
                     if not silent and stats["failed"]:
-                        messagebox.showwarning(APP_TITLE, msg + "\n\n有解析异常，可显示“提取状态”字段查看。")
+                        messagebox.showwarning(APP_TITLE, msg + "\n\n" + "\n".join(stats.get("filing_errors", [])[:8]))
                     self.queue_duplicate_prompt(stats["duplicates"], force=not silent)
 
                 self.after(0, finish)
@@ -1931,19 +2018,21 @@ class InvoiceApp(tk.Tk):
                     email_addr=email_addr,
                     auth_code=auth_code,
                     output_dir=BASE_DIR,
+                    dedupe_dirs=[invoice_dir(), abnormal_dir()],
                     start_time=start_time,
                     progress=self.set_status,
                 )
                 stats = sync_folder(progress=self.set_status)
-                self._last_folder_signature = folder_signature()
-                if result["failed"] == 0:
+                self._last_folder_signature = completed_scan_signature(stats)
+                has_failures = bool(result["failed"] or stats.get("filing_errors") or stats.get("deferred_paths") or stats.get("rescan_needed"))
+                if not has_failures:
                     set_setting("qq_invoice_last_fetch", started.isoformat(timespec="seconds"))
                 self.after(0, self.refresh_all)
                 msg = format_mail_fetch_report(result, stats)
-                self.set_status(f"邮箱获取完成：新下载 {result['downloaded']}，失败 {result['failed']}")
+                self.set_status(f"邮箱获取完成：新下载 {result['downloaded']}，失败 {result['failed']}；异常文件 {stats.get('abnormal_count', 0)} 项")
 
                 def finish_fetch():
-                    self.show_mail_fetch_result(msg, bool(result["failed"]), stats["duplicates"])
+                    self.show_mail_fetch_result(msg, has_failures, stats["duplicates"])
 
                 self.after(0, finish_fetch)
             except Exception as e:

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""QQ 收件箱发票导入：京东下载链接、拼多多与支付宝发票管家 PDF 附件。"""
+"""QQ 收件箱发票导入：京东链接、拼多多与支付宝管家 PDF / ZIP 附件。"""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import imaplib
 import io
 import os
 import re
+import stat
 import tempfile
 import time
 import unicodedata
@@ -28,6 +29,10 @@ IMAP_HOST = "imap.qq.com"
 IMAP_PORT = 993
 JD_SENDER = "customer_service@jd.com"
 SUBJECT_KEYWORD = "电子发票已开具"
+MAX_ZIP_BYTES = 50 * 1024 * 1024
+MAX_ZIP_ENTRIES = 2000
+MAX_ZIP_PDF_BYTES = 50 * 1024 * 1024
+MAX_ZIP_TOTAL_BYTES = 200 * 1024 * 1024
 
 MAIL_SOURCES = {
     "jd": {"name": "京东", "sender": JD_SENDER, "subject": SUBJECT_KEYWORD},
@@ -259,19 +264,36 @@ def _sha256_bytes(data: bytes) -> str:
 
 
 def _existing_pdf_hashes(output_dir: Path) -> set[str]:
+    directory_info = output_dir.lstat()
+    if _linked_file_stat(directory_info) or not stat.S_ISDIR(directory_info.st_mode):
+        raise ValueError(f"不读取链接目录或非文件夹：{output_dir.name}")
     result = set()
     for path in output_dir.iterdir():
-        if path.suffix.lower() != ".pdf" or not path.is_file():
+        if path.suffix.lower() != ".pdf":
             continue
         try:
+            info = path.lstat()
+            if _linked_file_stat(info) or not stat.S_ISREG(info.st_mode):
+                continue
             h = hashlib.sha256()
-            with path.open("rb") as f:
+            flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+            with os.fdopen(os.open(path, flags), "rb") as f:
+                opened = os.fstat(f.fileno())
+                if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+                    continue
                 for chunk in iter(lambda: f.read(1024 * 1024), b""):
                     h.update(chunk)
             result.add(h.hexdigest())
         except OSError:
             pass
     return result
+
+
+def _linked_file_stat(info) -> bool:
+    return stat.S_ISLNK(info.st_mode) or bool(
+        getattr(info, "st_file_attributes", 0)
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    )
 
 
 def _non_pdf_response_error(data: bytes, content_type: str) -> str:
@@ -365,14 +387,90 @@ def _message_source(msg, sources) -> str | None:
     return None
 
 
-def _pdf_attachments(msg):
+def _invoice_attachments(msg):
     for part in msg.walk():
         if part.is_multipart():
             continue
         filename = decode_mime_header(part.get_filename() or "")
-        if part.get_content_type() != "application/pdf" and not filename.lower().endswith(".pdf"):
-            continue
-        yield filename or "发票.pdf", part.get_payload(decode=True) or b""
+        content_type = part.get_content_type()
+        if filename.lower().endswith(".zip") or content_type in (
+            "application/zip", "application/x-zip-compressed", "application/x-zip",
+        ):
+            yield "zip", filename or "发票.zip", part.get_payload(decode=True) or b""
+        elif content_type == "application/pdf" or filename.lower().endswith(".pdf"):
+            yield "pdf", filename or "发票.pdf", part.get_payload(decode=True) or b""
+
+
+def _zip_member_name(info) -> str:
+    name = info.filename
+    if not info.flag_bits & 0x800:
+        # Older Windows exporters commonly use GBK without the ZIP UTF-8 flag.
+        try:
+            name = name.encode("cp437").decode("gb18030")
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            pass
+    return name
+
+
+def _zip_pdf_attachments(data):
+    """Yield (member name, PDF bytes, error); an empty name describes the archive.
+
+    An empty name with no error means a readable archive containing no PDFs;
+    the caller decides whether the complete email has any supported PDF.
+
+    Never extract members to disk: member paths are labels only. Budget both
+    declared and actual reads, and keep other usable members after a bad member.
+    """
+    if len(data) > MAX_ZIP_BYTES:
+        yield "", None, f"ZIP 压缩包超过大小限制（{MAX_ZIP_BYTES // 1024 // 1024} MiB）"
+        return
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(data))
+    except (zipfile.BadZipFile, OSError, ValueError, NotImplementedError) as exc:
+        yield "", None, f"无法读取 ZIP 压缩包，文件可能已损坏或格式不受支持：{type(exc).__name__}"
+        return
+    with archive:
+        entries = archive.infolist()
+        if len(entries) > MAX_ZIP_ENTRIES:
+            yield "", None, f"ZIP 条目数超过限制（{MAX_ZIP_ENTRIES} 项）"
+            return
+        candidates = 0
+        read_budget = 0
+        for info in entries:
+            name = _zip_member_name(info)
+            if info.is_dir() or not name.lower().endswith(".pdf"):
+                continue
+            candidates += 1
+            if stat.S_ISLNK(info.external_attr >> 16):
+                yield name, None, "ZIP 中的 PDF 条目是符号链接，已拒绝读取"
+                continue
+            if info.flag_bits & 1:
+                yield name, None, "ZIP 中的 PDF 已加密，暂不支持密码解压"
+                continue
+            if info.file_size > MAX_ZIP_PDF_BYTES:
+                yield name, None, f"ZIP 内 PDF 超过单文件限制（{MAX_ZIP_PDF_BYTES // 1024 // 1024} MiB）"
+                continue
+            if read_budget + info.file_size > MAX_ZIP_TOTAL_BYTES:
+                yield name, None, f"ZIP 内 PDF 累计大小超过限制（{MAX_ZIP_TOTAL_BYTES // 1024 // 1024} MiB）"
+                continue
+            # Reserve before opening so corrupt members also consume the budget.
+            read_budget += info.file_size
+            try:
+                with archive.open(info) as stream:
+                    payload = stream.read(min(info.file_size, MAX_ZIP_PDF_BYTES) + 1)
+                if len(payload) != info.file_size:
+                    raise ValueError("解压内容大小与 ZIP 记录不一致")
+            except NotImplementedError:
+                yield name, None, "ZIP 中的 PDF 使用了不支持的压缩方式"
+                continue
+            except Exception as exc:
+                # zipfile delegates to zlib/bz2/lzma; malformed streams can raise
+                # codec-specific errors as well as BadZipFile or RuntimeError.
+                yield name, None, f"ZIP 内 PDF 解压失败（损坏或压缩方式不可用）：{type(exc).__name__}"
+                continue
+            yield name, payload, ""
+        if not candidates:
+            yield "", None, ""
 
 
 def _save_pdf(data: bytes, output_dir: Path, stem: str, digest: str) -> Path:
@@ -420,14 +518,17 @@ def fetch_qq_invoices(
     start_time=None,
     progress=None,
     sources=None,
+    dedupe_dirs=None,
 ) -> dict:
     """Import approved invoice emails from QQ INBOX, without changing the mailbox.
 
     sources: jd / pinduoduo / alipay; None selects all three.
     emails counts matching messages; links counts unique JD URLs; attachments
-    counts PDF attachment candidates. File outcomes are downloaded/skipped/failed;
+    counts PDF attachment candidates, including members of ZIP attachments;
+    archives counts ZIP attachments. File outcomes are downloaded/skipped/failed;
     failed also includes unreadable messages or messages with no supported PDF.
     Content hashes, never filenames or invoice numbers, determine duplicates.
+    dedupe_dirs optionally includes other folders' direct PDF files in that check.
     """
     if sources is None:
         sources = tuple(MAIL_SOURCES)
@@ -441,13 +542,25 @@ def fetch_qq_invoices(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     start_dt, imap_date = parse_start_time(start_time)
-    counters = ("emails", "links", "attachments", "downloaded", "skipped", "failed")
+    counters = ("emails", "links", "attachments", "archives", "downloaded", "skipped", "failed")
     result = {key: 0 for key in counters}
     result["errors"] = []
     result["sources"] = {
         source: {key: 0 for key in counters} for source in sources
     }
     existing_hashes = _existing_pdf_hashes(output_dir)
+    if isinstance(dedupe_dirs, (str, Path)):
+        dedupe_dirs = (dedupe_dirs,)
+    for folder in dedupe_dirs or ():
+        folder = Path(folder)
+        try:
+            folder_info = folder.lstat()
+        except FileNotFoundError:
+            continue
+        if _linked_file_stat(folder_info):
+            raise ValueError(f"不读取链接目录：{folder.name}")
+        if stat.S_ISDIR(folder_info.st_mode) and folder != output_dir:
+            existing_hashes.update(_existing_pdf_hashes(folder))
 
     def count(source, key):
         result[key] += 1
@@ -537,16 +650,38 @@ def fetch_qq_invoices(
             context = _message_error_context(msg, source, uid)
             if source != "jd":
                 attachment_count = 0
-                for filename, data in _pdf_attachments(msg):
-                    attachment_count += 1
-                    count(source, "attachments")
-                    # A digest suffix avoids common attachment-name collisions.
-                    attachment_stem = filename[:-4] if filename.lower().endswith(".pdf") else filename
-                    stem = f"{MAIL_SOURCES[source]['name']}_{safe_filename(attachment_stem)[:120]}_{_sha256_bytes(data)[:12]}"
-                    save_candidate(source, stem, data, context, filename=filename)
-                if not attachment_count:
+                archives_without_pdf = []
+                failures_before = result["failed"]
+                for kind, attachment_name, data in _invoice_attachments(msg):
+                    if kind == "zip":
+                        count(source, "archives")
+                        candidates = _zip_pdf_attachments(data)
+                        file_context = f"{context}｜压缩包：{_diagnostic_text(attachment_name, 100)}"
+                    else:
+                        candidates = ((attachment_name, data, ""),)
+                        file_context = context
+                    for filename, payload, error in candidates:
+                        if not filename:  # An archive outcome is not a PDF candidate.
+                            if error:
+                                count(source, "failed")
+                                report_error(file_context, error)
+                            else:
+                                archives_without_pdf.append(attachment_name)
+                            continue
+                        attachment_count += 1
+                        count(source, "attachments")
+                        # Flatten ZIP members into the existing safe, collision-proof naming.
+                        basename = filename.replace("\\", "/").rsplit("/", 1)[-1] if kind == "zip" else filename
+                        attachment_stem = basename[:-4] if basename.lower().endswith(".pdf") else basename
+                        stem = f"{MAIL_SOURCES[source]['name']}_{safe_filename(attachment_stem)[:120]}_{_sha256_bytes(payload or b'')[:12]}"
+                        save_candidate(source, stem, payload, file_context, error, filename)
+                if not attachment_count and result["failed"] == failures_before:
                     count(source, "failed")
-                    report_error(context, "邮件未找到 PDF 附件（暂不支持压缩包或下载页面）")
+                    if archives_without_pdf:
+                        names = "、".join(_diagnostic_text(name, 100) for name in archives_without_pdf)
+                        report_error(context, f"邮件未找到 PDF 附件，ZIP 压缩包中也未找到 PDF 文件（压缩包：{names}）")
+                    else:
+                        report_error(context, "邮件未找到 PDF 附件或含 PDF 的 ZIP 压缩包（暂不支持下载页面）")
                 continue
 
             subject = decode_mime_header(str(msg.get("Subject", "")))
