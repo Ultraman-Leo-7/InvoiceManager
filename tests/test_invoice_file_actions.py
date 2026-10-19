@@ -260,14 +260,19 @@ def test_real_tree_bindings_target_goods_shipping_and_invoice_row(case, monkeypa
     monkeypatch.setattr(app.InvoiceApp, "open_invoice_file", lambda self, digest, reveal=False: calls.append((digest, reveal)))
     root = app.InvoiceApp()
     try:
-        root.geometry("1600x1000+0+0")
+        root.geometry("980x640+0+0")
         root.update()
         root.notebook.select(root.purchase_tab)
         root.update()
         item, = root.purchase_tree.get_children()
         for column, digest in (("商品发票", goods), ("快递费发票", shipping)):
             x, y, width, height = root.purchase_tree.bbox(item, column)
-            root.purchase_tree.event_generate("<Button-3>", x=x + width // 2, y=y + height // 2)
+            click_x, click_y = x + min(10, width // 2), y + height // 2
+            assert click_x < root.purchase_tree.winfo_width()
+            display_column = root.purchase_tree.identify_column(click_x)
+            assert root.purchase_tree.column(display_column, "id") == column
+            root.purchase_tree.event_generate("<Button-3>", x=click_x, y=click_y)
+            root.purchase_tree.event_generate("<ButtonRelease-3>", x=click_x, y=click_y)
             root.update()
             root._invoice_file_menu.invoke(0)
             root._invoice_file_menu.invoke(1)
@@ -278,6 +283,7 @@ def test_real_tree_bindings_target_goods_shipping_and_invoice_row(case, monkeypa
         digest = root.invoice_tree.set(item, "_digest")
         x, y, width, height = root.invoice_tree.bbox(item, "文件名")
         root.invoice_tree.event_generate("<Button-3>", x=x + width // 2, y=y + height // 2)
+        root.invoice_tree.event_generate("<ButtonRelease-3>", x=x + width // 2, y=y + height // 2)
         root.update()
         root._invoice_file_menu.invoke(1)
         assert calls[-1] == (digest, False)
