@@ -733,6 +733,7 @@ class InvoiceApp(tk.Tk):
         table_frame.rowconfigure(0, weight=1)
         table_frame.columnconfigure(0, weight=1)
         self.invoice_tree.bind("<Double-1>", self.on_invoice_double_click)
+        self.invoice_tree.bind("<Button-3>", self.on_invoice_context_menu)
 
         actions = ttk.Frame(self.invoice_tab, padding=(8, 0, 8, 8))
         actions.pack(fill="x")
@@ -829,6 +830,76 @@ class InvoiceApp(tk.Tk):
             if values:
                 result.append(str(values[0]))
         return result
+
+    def _show_invoice_file_menu(self, tree, event, digest):
+        item = tree.identify_row(event.y)
+        tree.selection_set(item)
+        tree.focus(item)
+        menu = getattr(self, "_invoice_file_menu", None)
+        if menu is None:
+            menu = self._invoice_file_menu = tk.Menu(self, tearoff=False)
+        menu.delete(0, "end")
+        state = "normal" if digest else "disabled"
+        menu.add_command(
+            label="打开所在文件夹并选中", state=state,
+            command=lambda: self.open_invoice_file(digest, reveal=True),
+        )
+        menu.add_command(
+            label="用默认软件打开发票", state=state,
+            command=lambda: self.open_invoice_file(digest),
+        )
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+        return "break"
+
+    def on_invoice_context_menu(self, event):
+        tree = self.invoice_tree
+        if tree.identify_region(event.x, event.y) != "cell":
+            return
+        item = tree.identify_row(event.y)
+        if item:
+            return self._show_invoice_file_menu(tree, event, str(tree.set(item, "_digest")))
+
+    def on_purchase_invoice_context_menu(self, event):
+        tree = self.purchase_tree
+        if tree.identify_region(event.x, event.y) != "cell":
+            return
+        item = tree.identify_row(event.y)
+        column = tree.column(tree.identify_column(event.x), "id")
+        if item and column in {"商品发票", "快递费发票"}:
+            digest = self._purchase_invoice_digests.get((item, column))
+            return self._show_invoice_file_menu(tree, event, digest)
+
+    def on_unused_invoice_context_menu(self, event):
+        tree = self.unused_invoice_tree
+        if tree.identify_region(event.x, event.y) != "cell":
+            return
+        item = tree.identify_row(event.y)
+        if item:
+            return self._show_invoice_file_menu(tree, event, self._unused_invoice_digests.get(item))
+
+    def open_invoice_file(self, digest, reveal=False):
+        try:
+            with connect_db() as conn:
+                row = conn.execute(
+                    "SELECT filename FROM invoices WHERE digest=? AND active=1", (digest,),
+                ).fetchone()
+            if not row:
+                raise FileNotFoundError("该发票已不在当前列表中，请刷新后重试")
+            path = invoice_file_path(row["filename"], digest).resolve()
+            if sys.platform == "win32":
+                if reveal:
+                    subprocess.Popen(["explorer.exe", "/select,", str(path)])
+                else:
+                    os.startfile(str(path))
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", "-R", str(path)] if reveal else ["open", str(path)])
+            else:
+                subprocess.Popen(["xdg-open", str(path.parent if reveal else path)])
+        except (OSError, ValueError, sqlite3.Error) as error:
+            messagebox.showerror(APP_TITLE, f"无法打开或定位发票：{error}")
 
     def mark_selected_confirmed(self):
         digests = self.selected_digests()
@@ -983,6 +1054,7 @@ class InvoiceApp(tk.Tk):
         table_frame.rowconfigure(0, weight=1)
         table_frame.columnconfigure(0, weight=1)
         self.purchase_tree.bind("<Double-1>", lambda _e: self.load_selected_purchase_for_edit())
+        self.purchase_tree.bind("<Button-3>", self.on_purchase_invoice_context_menu)
 
         p_actions = ttk.Frame(self.purchase_tab, padding=(8, 0, 8, 6))
         p_actions.pack(fill="x")
@@ -1028,6 +1100,7 @@ class InvoiceApp(tk.Tk):
         self.unused_invoice_tree.column("文件名", width=360)
         self.unused_invoice_tree.column("价税合计", width=100)
         self.unused_invoice_tree.grid(row=1, column=1, sticky="nsew", padx=(8, 0), pady=(4, 0))
+        self.unused_invoice_tree.bind("<Button-3>", self.on_unused_invoice_context_menu)
 
     def open_manual_match_dialog(self):
         ids = self.selected_purchase_ids()
@@ -1337,6 +1410,8 @@ class InvoiceApp(tk.Tk):
         for tree in (self.purchase_tree, self.missing_tree, self.unused_invoice_tree):
             for item in tree.get_children():
                 tree.delete(item)
+        self._purchase_invoice_digests = {}
+        self._unused_invoice_digests = {}
 
         total_cents = 0
         for result in data["purchase_results"]:
@@ -1357,7 +1432,7 @@ class InvoiceApp(tk.Tk):
             status_text = "✓ 完整" if result["complete"] else "缺发票"
             if has_manual:
                 status_text += " · 手动"
-            self.purchase_tree.insert("", "end", values=(
+            item_id = self.purchase_tree.insert("", "end", values=(
                 p["id"],
                 p["name"],
                 f"{p['item_price']:.2f}",
@@ -1367,6 +1442,9 @@ class InvoiceApp(tk.Tk):
                 ship_text,
                 status_text,
             ))
+            for column, invoice in (("商品发票", item_inv), ("快递费发票", ship_inv)):
+                if invoice:
+                    self._purchase_invoice_digests[(item_id, column)] = str(invoice["digest"])
         for item in data["missing_components"]:
             self.missing_tree.insert(
                 "",
@@ -1375,11 +1453,12 @@ class InvoiceApp(tk.Tk):
             )
         for inv in data["unused_invoices"]:
             total = inv["total"]
-            self.unused_invoice_tree.insert(
+            item_id = self.unused_invoice_tree.insert(
                 "",
                 "end",
                 values=(inv["filename"], f"{total:.2f}" if isinstance(total, (int, float)) else ""),
             )
+            self._unused_invoice_digests[item_id] = str(inv["digest"])
         self.purchase_summary_var.set(
             f"购买 {len(data['purchase_results'])} 项 | 总金额 ¥{total_cents / 100:.2f} | "
             f"缺票 {len(data['missing_components'])} 项 | 未对应发票 {len(data['unused_invoices'])} 张"
@@ -2012,12 +2091,12 @@ class InvoiceApp(tk.Tk):
         if needs_history_rescan:
             ttk.Label(
                 outer, wraplength=560,
-                text="嵌套压缩包读取已升级，建议扫描一次全部历史收件箱，补齐旧版漏读的发票；已有 PDF 会按哈希跳过。",
+                text="如需补齐旧版漏读的嵌套压缩包发票，可手动选择扫描全部历史收件箱；已有 PDF 会按哈希跳过。",
             ).pack(anchor="w", pady=(0, 10))
-        mode_var = tk.StringVar(value="all" if needs_history_rescan or not last else "last")
+        mode_var = tk.StringVar(value="last" if last else "all")
         ttk.Radiobutton(
             outer,
-            text="从上次成功获取之后" + ("" if needs_history_rescan else "（推荐）"),
+            text="从上次成功获取之后" + ("（默认）" if last else ""),
             variable=mode_var,
             value="last",
             state="normal" if last else "disabled",
@@ -2030,7 +2109,7 @@ class InvoiceApp(tk.Tk):
             text="格式：YYYY-MM-DD 或 YYYY-MM-DD HH:MM；只填日期默认 00:00",
         ).pack(anchor="w", padx=(24, 0), pady=(0, 6))
         ttk.Radiobutton(
-            outer, text="扫描全部历史收件箱" + ("（本次推荐）" if needs_history_rescan else ""),
+            outer, text="扫描全部历史收件箱",
             variable=mode_var, value="all",
         ).pack(anchor="w", pady=3)
         buttons = ttk.Frame(outer)
