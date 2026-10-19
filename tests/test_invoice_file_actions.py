@@ -1,6 +1,7 @@
 """Right-click targets must stay tied to the displayed invoice, not row selection."""
 
 import os
+import subprocess
 import sys
 from tkinter import Menu as REAL_MENU
 from types import MethodType, SimpleNamespace
@@ -9,6 +10,8 @@ import pytest
 
 import app
 from purchase_tracker import add_purchase, set_manual_match
+
+REAL_POPEN = subprocess.Popen
 
 
 class Tree:
@@ -247,6 +250,20 @@ def test_missing_or_changed_invoice_and_launch_failure_show_error(case, monkeypa
 def test_real_tree_bindings_target_goods_shipping_and_invoice_row(case, monkeypatch):
     if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
         pytest.skip("Real Tk requires DISPLAY; Windows CI always runs this test")
+    # Destroying and reloading Tcl/Tk in the same Windows process can make later
+    # GUI fixtures fail to read init.tcl. Keep this full-app test's interpreter
+    # in its own process, matching the application's single-root lifetime.
+    if not os.environ.get("INVOICEMANAGER_NATIVE_CONTEXT_TEST"):
+        monkeypatch.setattr(subprocess, "Popen", REAL_POPEN)
+        env = os.environ.copy()
+        env["INVOICEMANAGER_NATIVE_CONTEXT_TEST"] = "1"
+        result = subprocess.run(
+            [sys.executable, "-m", "pytest", "-q",
+             f"{__file__}::test_real_tree_bindings_target_goods_shipping_and_invoice_row"],
+            env=env, capture_output=True, text=True, timeout=120,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        return
     _, goods = invoice(case)
     _, shipping = invoice(case, "快递.pdf", 6.0)
     with app.connect_db() as conn:
