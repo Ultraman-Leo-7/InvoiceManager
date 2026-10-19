@@ -4,6 +4,18 @@ All notable changes to InvoiceManager will be documented here.
 
 ## Unreleased
 
+## v5.2.24
+
+### Fixed
+
+- Restore the saved last-successful-fetch time as the default QQ mailbox start point even when import rules have changed; use all history by default only when no shared mailbox cursor exists
+- Keep historical recovery as an explicit option without changing cursor persistence or failure retry behavior
+
+### Added
+
+- Right-click invoice rows or the specific goods/shipping invoice cell in purchase records to select the PDF in Windows Explorer or open it with the system's default PDF application
+- Support the same actions for unused invoice rows; disable unmatched invoice-cell actions and report missing, replaced or inaccessible files without opening a different invoice
+
 ## v5.2.23
 
 ### Fixed

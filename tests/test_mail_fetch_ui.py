@@ -407,13 +407,15 @@ def test_already_scheduled_duplicate_prompt_waits_for_result_close_without_polli
 
 @pytest.mark.parametrize("stored_cursor,rules_version,expected_start", [
     (None, None, None),
-    ("2026-10-12T12:00:00", None, None),
-    ("2026-10-12T12:00:00", "1", None),
+    ("2026-10-12T12:00:00", None, "2026-10-12T12:00:00"),
+    ("2026-10-12T12:00:00", "1", "2026-10-12T12:00:00"),
     ("2026-10-12T12:00:00", "2", "2026-10-12T12:00:00"),
+    (None, "1", None),
     (None, "2", None),
 ])
-def test_mail_dialog_defaults_to_all_until_current_rules_have_scanned_history(
-        monkeypatch, stored_cursor, rules_version, expected_start):
+@pytest.mark.parametrize("selected_mode", [None, "all", "custom"])
+def test_mail_dialog_defaults_to_saved_cursor_regardless_of_import_rules(
+        monkeypatch, stored_cursor, rules_version, expected_start, selected_mode):
     legacy_settings = {
         "qq_email": "test@example.com",
         "qq_auth_code": "encrypted-placeholder",
@@ -423,7 +425,7 @@ def test_mail_dialog_defaults_to_all_until_current_rules_have_scanned_history(
         legacy_settings["qq_invoice_last_fetch"] = stored_cursor
     if rules_version is not None:
         legacy_settings["qq_invoice_import_rules_version"] = rules_version
-    read_keys, buttons, fetch_calls = [], [], []
+    read_keys, buttons, fetch_calls, radios = [], [], [], []
 
     def get_setting(key, default=""):
         read_keys.append(key)
@@ -434,16 +436,26 @@ def test_mail_dialog_defaults_to_all_until_current_rules_have_scanned_history(
         buttons.append(widget)
         return widget
 
+    def radio(*args, **kwargs):
+        widget = FakeWidget(*args, **kwargs)
+        radios.append(widget)
+        return widget
+
     monkeypatch.setattr(app, "get_setting", get_setting)
     monkeypatch.setattr(app, "unprotect_secret", lambda encrypted: "fake-auth-code")
     monkeypatch.setattr(app, "tk", SimpleNamespace(Toplevel=FakeWidget, StringVar=FakeVariable))
     monkeypatch.setattr(app, "ttk", SimpleNamespace(
-        Frame=FakeWidget, Label=FakeWidget, Radiobutton=FakeWidget,
+        Frame=FakeWidget, Label=FakeWidget, Radiobutton=radio,
         Entry=FakeWidget, Button=button,
     ))
     view = SimpleNamespace(run_qq_fetch=lambda *args: fetch_calls.append(args))
 
     app.InvoiceApp.open_qq_fetch_dialog(view)
+    assert radios[0].options["variable"].get() == ("last" if stored_cursor else "all")
+    assert radios[0].options["state"] == ("normal" if stored_cursor else "disabled")
+    if selected_mode is not None:
+        radios[0].options["variable"].value = selected_mode
+        expected_start = None if selected_mode == "all" else app.datetime.now().strftime("%Y-%m-%d 00:00")
     next(widget for widget in buttons if widget.options["text"] == "开始获取").options["command"]()
 
     assert "qq_invoice_last_fetch" in read_keys
